@@ -1,5 +1,7 @@
+//! Resolves XDG paths and loads the small TOML-like application config file.
 const std = @import("std");
 
+/// Absolute XDG paths used by configuration, cache, data, and state storage.
 pub const Paths = struct {
     config_dir: []const u8,
     cache_dir: []const u8,
@@ -10,12 +12,14 @@ pub const Paths = struct {
     state_file: []const u8,
 };
 
+/// User-editable configuration values loaded from `config.toml`.
 pub const Config = struct {
     music_roots: []const []const u8,
     animations: bool,
     scan_on_startup: bool,
 };
 
+/// Bundles the resolved paths with the parsed config for app startup.
 pub const Loaded = struct {
     allocator: std.mem.Allocator,
     paths: Paths,

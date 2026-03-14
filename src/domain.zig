@@ -1,6 +1,8 @@
+//! Shared domain types plus normalization helpers used across the application.
 const std = @import("std");
 const ui_strings = @import("ui_strings").Strings;
 
+/// Playback policy applied when advancing through the current queue.
 pub const PlayMode = enum {
     single_loop,
     playlist_loop,
@@ -23,6 +25,7 @@ pub const PlayMode = enum {
     }
 };
 
+/// Distinguishes how a derived playlist was produced.
 pub const PlaylistKind = enum {
     folder,
     artist,
@@ -37,6 +40,7 @@ pub const PlaylistKind = enum {
     }
 };
 
+/// Immutable track metadata cached from the filesystem and media tags.
 pub const Track = struct {
     path: []const u8,
     title: []const u8,
@@ -53,6 +57,7 @@ pub const Track = struct {
     }
 };
 
+/// A named track grouping backed by indices into `Library.tracks`.
 pub const Playlist = struct {
     name: []const u8,
     search_name: []const u8,
@@ -60,6 +65,7 @@ pub const Playlist = struct {
     track_indices: []usize,
 };
 
+/// Arena-backed snapshot of all tracks and derived playlists.
 pub const Library = struct {
     arena: std.heap.ArenaAllocator,
     tracks: []Track,

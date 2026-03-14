@@ -1,3 +1,4 @@
+//! Coordinates the TUI, playback controller, cached library, and async scans.
 const std = @import("std");
 const vaxis = @import("vaxis");
 
@@ -8,6 +9,7 @@ const playback = @import("playback.zig");
 const storage = @import("storage.zig");
 const ui_strings = @import("ui_strings").Strings;
 
+/// Events delivered from the terminal, timer thread, and scanner thread.
 const Event = union(enum) {
     key_press: vaxis.Key,
     winsize: vaxis.Winsize,
@@ -87,6 +89,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     try model.run();
 }
 
+/// Holds the full interactive application state for one TUI session.
 const Model = struct {
     allocator: std.mem.Allocator,
     loaded_config: config.Loaded,
@@ -133,6 +136,7 @@ const Model = struct {
         failed,
     };
 
+    /// Shared scan bookkeeping published by the background scanner thread.
     const ScanShared = struct {
         mutex: std.Thread.Mutex = .{},
         scanned_files: usize = 0,

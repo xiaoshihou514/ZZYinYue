@@ -1,3 +1,4 @@
+//! Persists the scanned library and lightweight playback session state in SQLite.
 const std = @import("std");
 const domain = @import("domain.zig");
 
@@ -5,12 +6,14 @@ const c = @cImport({
     @cInclude("sqlite3.h");
 });
 
+/// Stores only cross-session playback state, not transient UI navigation.
 pub const SessionState = struct {
     play_mode: domain.PlayMode = .playlist_loop,
     current_track_path: []const u8 = "",
     current_position_seconds: f64 = 0.0,
 };
 
+/// Thin SQLite wrapper for the cached library and app state tables.
 pub const Database = struct {
     db: *c.sqlite3,
     allocator: std.mem.Allocator,

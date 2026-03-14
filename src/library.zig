@@ -1,3 +1,4 @@
+//! Scans music roots, extracts metadata, and materializes playlist views.
 const std = @import("std");
 const domain = @import("domain.zig");
 const c = @cImport({
@@ -6,12 +7,14 @@ const c = @cImport({
     @cInclude("libavutil/avutil.h");
 });
 
+/// Final result returned by a full or incremental library refresh.
 pub const ScanSummary = struct {
     library: domain.Library,
     scanned_files: usize,
     metadata_failures: usize,
 };
 
+/// Callbacks used by the scanner to publish progress and cancellation.
 pub const ScanProgress = struct {
     context: *anyopaque,
     on_file: *const fn (ctx: *anyopaque, path: []const u8) void,
@@ -23,6 +26,7 @@ const PlaylistBucket = struct {
     indices: std.ArrayList(usize),
 };
 
+/// Temporary owned track data used before the arena-backed library is rebuilt.
 const TrackDraft = struct {
     path: []const u8,
     title: []const u8,

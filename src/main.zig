@@ -1,3 +1,4 @@
+//! Entry point that boots the app with a general-purpose allocator.
 const std = @import("std");
 const app = @import("ZZYinYue").app;
 

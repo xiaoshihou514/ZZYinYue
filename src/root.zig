@@ -1,3 +1,4 @@
+//! Exposes the main library modules and keeps tests wired against them.
 pub const app = @import("app.zig");
 pub const config = @import("config.zig");
 pub const domain = @import("domain.zig");

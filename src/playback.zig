@@ -1,3 +1,4 @@
+//! Wraps libmpv behind a queue-oriented playback controller for the TUI.
 const std = @import("std");
 const domain = @import("domain.zig");
 const ui_strings = @import("ui_strings").Strings;
@@ -6,6 +7,7 @@ const c = @cImport({
     @cInclude("mpv/client.h");
 });
 
+/// Owns the mpv handle plus queue/play-mode state used by the UI.
 pub const Controller = struct {
     allocator: std.mem.Allocator,
     handle: *c.mpv_handle,
