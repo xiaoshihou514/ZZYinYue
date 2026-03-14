@@ -49,9 +49,6 @@ pub fn scan(
     music_roots: []const []const u8,
     progress: ?*ScanProgress,
 ) !ScanSummary {
-    var library = domain.Library.initEmpty(allocator);
-    errdefer library.deinit();
-
     var paths = std.ArrayList([]u8).empty;
     defer {
         for (paths.items) |path| allocator.free(path);
@@ -65,37 +62,83 @@ pub fn scan(
     const probe_result = try probeTracksParallel(paths.items, progress);
     var drafts = probe_result.tracks;
     defer {
-        for (drafts.items) |*draft| draft.deinit(std.heap.page_allocator);
-        drafts.deinit(std.heap.page_allocator);
+        deinitDrafts(&drafts, std.heap.page_allocator);
     }
 
-    const arena = library.allocator();
-    var tracks = std.ArrayList(domain.Track).empty;
-    defer tracks.deinit(arena);
-
-    for (drafts.items) |draft| {
-        try tracks.append(arena, .{
-            .path = try arena.dupe(u8, draft.path),
-            .title = try arena.dupe(u8, draft.title),
-            .artist = try arena.dupe(u8, draft.artist),
-            .album = try arena.dupe(u8, draft.album),
-            .folder = try arena.dupe(u8, draft.folder),
-            .search_blob = try arena.dupe(u8, draft.search_blob),
-            .duration_seconds = draft.duration_seconds,
-            .modified_unix = draft.modified_unix,
-        });
-    }
-
-    std.mem.sort(domain.Track, tracks.items, {}, sortTracks);
-
-    library.tracks = try tracks.toOwnedSlice(arena);
-    library.playlists = try buildPlaylists(arena, library.tracks);
+    const library = try buildLibraryFromDrafts(allocator, drafts.items);
 
     return .{
         .library = library,
         .scanned_files = library.tracks.len,
         .metadata_failures = probe_result.metadata_failures,
     };
+}
+
+pub fn refreshIncremental(
+    allocator: std.mem.Allocator,
+    existing: *const domain.Library,
+    music_roots: []const []const u8,
+    progress: ?*ScanProgress,
+) !ScanSummary {
+    var paths = std.ArrayList([]u8).empty;
+    defer {
+        for (paths.items) |path| allocator.free(path);
+        paths.deinit(allocator);
+    }
+
+    for (music_roots) |root| {
+        try collectAudioPaths(allocator, &paths, root, progress);
+    }
+
+    var existing_by_path = std.StringHashMap(domain.Track).init(allocator);
+    defer existing_by_path.deinit();
+    try existing_by_path.ensureTotalCapacity(@intCast(existing.tracks.len));
+    for (existing.tracks) |track| {
+        try existing_by_path.put(track.path, track);
+    }
+
+    var reused = std.ArrayList(TrackDraft).empty;
+    defer deinitDrafts(&reused, std.heap.page_allocator);
+
+    var changed_paths = std.ArrayList([]u8).empty;
+    defer changed_paths.deinit(allocator);
+
+    for (paths.items) |path| {
+        if (progressCancelled(progress)) return error.ScanCancelled;
+
+        const stat = statAbsolute(path) catch continue;
+        const modified_unix: i64 = @intCast(stat.mtime);
+        if (existing_by_path.get(path)) |track| {
+            if (!shouldReprobeTrack(track, modified_unix)) {
+                try reused.append(std.heap.page_allocator, try draftFromTrack(std.heap.page_allocator, track));
+                if (progress) |callback| callback.on_file(callback.context, path);
+                continue;
+            }
+        }
+        try changed_paths.append(allocator, path);
+    }
+
+    const probe_result = try probeTracksParallel(changed_paths.items, progress);
+    var changed = probe_result.tracks;
+    defer deinitDrafts(&changed, std.heap.page_allocator);
+
+    try reused.ensureTotalCapacity(std.heap.page_allocator, reused.items.len + changed.items.len);
+    for (changed.items) |draft| {
+        try reused.append(std.heap.page_allocator, draft);
+    }
+    changed.clearRetainingCapacity();
+
+    const library = try buildLibraryFromDrafts(allocator, reused.items);
+    return .{
+        .library = library,
+        .scanned_files = paths.items.len,
+        .metadata_failures = probe_result.metadata_failures,
+    };
+}
+
+fn shouldReprobeTrack(track: domain.Track, modified_unix: i64) bool {
+    if (track.modified_unix != modified_unix) return true;
+    return track.artist.len == 0 and track.album.len == 0;
 }
 
 fn probeTracksParallel(
@@ -358,6 +401,51 @@ fn progressCancelled(progress: ?*const ScanProgress) bool {
     return false;
 }
 
+fn buildLibraryFromDrafts(allocator: std.mem.Allocator, drafts: []const TrackDraft) !domain.Library {
+    var library = domain.Library.initEmpty(allocator);
+    errdefer library.deinit();
+
+    const arena = library.allocator();
+    var tracks = std.ArrayList(domain.Track).empty;
+    defer tracks.deinit(arena);
+
+    for (drafts) |draft| {
+        try tracks.append(arena, .{
+            .path = try arena.dupe(u8, draft.path),
+            .title = try arena.dupe(u8, draft.title),
+            .artist = try arena.dupe(u8, draft.artist),
+            .album = try arena.dupe(u8, draft.album),
+            .folder = try arena.dupe(u8, draft.folder),
+            .search_blob = try arena.dupe(u8, draft.search_blob),
+            .duration_seconds = draft.duration_seconds,
+            .modified_unix = draft.modified_unix,
+        });
+    }
+
+    std.mem.sort(domain.Track, tracks.items, {}, sortTracks);
+    library.tracks = try tracks.toOwnedSlice(arena);
+    library.playlists = try buildPlaylists(arena, library.tracks);
+    return library;
+}
+
+fn draftFromTrack(allocator: std.mem.Allocator, track: domain.Track) !TrackDraft {
+    return .{
+        .path = try allocator.dupe(u8, track.path),
+        .title = try allocator.dupe(u8, track.title),
+        .artist = try allocator.dupe(u8, track.artist),
+        .album = try allocator.dupe(u8, track.album),
+        .folder = try allocator.dupe(u8, track.folder),
+        .search_blob = try allocator.dupe(u8, track.search_blob),
+        .duration_seconds = track.duration_seconds,
+        .modified_unix = track.modified_unix,
+    };
+}
+
+fn deinitDrafts(drafts: *std.ArrayList(TrackDraft), allocator: std.mem.Allocator) void {
+    for (drafts.items) |*draft| draft.deinit(allocator);
+    drafts.deinit(allocator);
+}
+
 fn sortTracks(_: void, lhs: domain.Track, rhs: domain.Track) bool {
     return std.mem.lessThan(u8, lhs.search_blob, rhs.search_blob);
 }
@@ -446,9 +534,22 @@ fn readMetadata(allocator: std.mem.Allocator, path: []const u8) !Metadata {
     const ctx = format_ctx orelse return error.FfprobeFailed;
     if (c.avformat_find_stream_info(ctx, null) < 0) return error.FfprobeFailed;
 
-    const title = try dupMetadataValue(allocator, ctx.metadata, "title");
-    const artist = try dupMetadataValue(allocator, ctx.metadata, "artist");
-    const album = try dupMetadataValue(allocator, ctx.metadata, "album");
+    const stream_metadata = bestAudioStreamMetadata(ctx);
+    const title = try dupMetadataValueAny(
+        allocator,
+        &.{ ctx.metadata, stream_metadata },
+        &.{ "title", "TITLE" },
+    );
+    const artist = try dupMetadataValueAny(
+        allocator,
+        &.{ ctx.metadata, stream_metadata },
+        &.{ "artist", "ARTIST", "album_artist", "ALBUM_ARTIST", "albumartist", "ALBUMARTIST", "author", "AUTHOR" },
+    );
+    const album = try dupMetadataValueAny(
+        allocator,
+        &.{ ctx.metadata, stream_metadata },
+        &.{ "album", "ALBUM" },
+    );
 
     var duration_seconds: f64 = 0.0;
     if (ctx.duration > 0) {
@@ -463,11 +564,60 @@ fn readMetadata(allocator: std.mem.Allocator, path: []const u8) !Metadata {
     };
 }
 
+fn bestAudioStreamMetadata(ctx: *c.AVFormatContext) ?*c.AVDictionary {
+    const stream_index = c.av_find_best_stream(ctx, c.AVMEDIA_TYPE_AUDIO, -1, -1, null, 0);
+    if (stream_index < 0) return null;
+    const idx: usize = @intCast(stream_index);
+    const stream = ctx.streams[idx];
+    if (stream == null) return null;
+    return stream[0].metadata;
+}
+
+fn dupMetadataValueAny(
+    allocator: std.mem.Allocator,
+    dicts: []const ?*c.AVDictionary,
+    comptime keys: []const [:0]const u8,
+) ![]const u8 {
+    inline for (keys) |key| {
+        for (dicts) |dict| {
+            if (metadataValue(dict, key)) |value| {
+                if (value.len > 0) return allocator.dupe(u8, value);
+            }
+        }
+    }
+    return allocator.dupe(u8, "");
+}
+
+fn metadataValue(dict: ?*c.AVDictionary, key: [:0]const u8) ?[]const u8 {
+    if (dict == null) return null;
+    const entry = c.av_dict_get(dict, key.ptr, null, 0);
+    if (entry == null or entry.*.value == null) return null;
+    return std.mem.span(entry.*.value);
+}
+
 fn dupMetadataValue(allocator: std.mem.Allocator, dict: ?*c.AVDictionary, key: [:0]const u8) ![]const u8 {
     if (dict == null) return allocator.dupe(u8, "");
     const entry = c.av_dict_get(dict, key.ptr, null, 0);
     if (entry == null or entry.*.value == null) return allocator.dupe(u8, "");
     return allocator.dupe(u8, std.mem.span(entry.*.value));
+}
+
+test "metadata lookup falls back to stream tags and alternate keys" {
+    var format_dict: ?*c.AVDictionary = null;
+    defer c.av_dict_free(&format_dict);
+    var stream_dict: ?*c.AVDictionary = null;
+    defer c.av_dict_free(&stream_dict);
+
+    _ = c.av_dict_set(&stream_dict, "ARTIST", "C418", 0);
+    _ = c.av_dict_set(&stream_dict, "ALBUM", "Minecraft", 0);
+
+    const artist = try dupMetadataValueAny(std.testing.allocator, &.{ format_dict, stream_dict }, &.{ "artist", "ARTIST" });
+    defer std.testing.allocator.free(artist);
+    const album = try dupMetadataValueAny(std.testing.allocator, &.{ format_dict, stream_dict }, &.{ "album", "ALBUM" });
+    defer std.testing.allocator.free(album);
+
+    try std.testing.expectEqualStrings("C418", artist);
+    try std.testing.expectEqualStrings("Minecraft", album);
 }
 
 test "buildPlaylists creates folder and metadata playlists" {
@@ -499,4 +649,81 @@ test "buildPlaylists creates folder and metadata playlists" {
 
     const playlists = try buildPlaylists(arena, lib.tracks);
     try std.testing.expect(playlists.len >= 5);
+}
+
+test "refreshIncremental reuses unchanged tracks and removes deleted paths" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("music");
+    {
+        const file = try tmp.dir.createFile("music/keep.mp3", .{});
+        file.close();
+    }
+    {
+        const file = try tmp.dir.createFile("music/delete.mp3", .{});
+        file.close();
+    }
+
+    const keep_path = try tmp.dir.realpathAlloc(std.testing.allocator, "music/keep.mp3");
+    defer std.testing.allocator.free(keep_path);
+    const delete_path = try tmp.dir.realpathAlloc(std.testing.allocator, "music/delete.mp3");
+    defer std.testing.allocator.free(delete_path);
+
+    const keep_stat = try statAbsolute(keep_path);
+    const delete_stat = try statAbsolute(delete_path);
+
+    var existing = domain.Library.initEmpty(std.testing.allocator);
+    defer existing.deinit();
+    const arena = existing.allocator();
+    existing.tracks = try arena.alloc(domain.Track, 2);
+    existing.tracks[0] = .{
+        .path = try arena.dupe(u8, keep_path),
+        .title = try arena.dupe(u8, "保留标题"),
+        .artist = try arena.dupe(u8, "保留作者"),
+        .album = try arena.dupe(u8, ""),
+        .folder = try arena.dupe(u8, "music"),
+        .search_blob = try arena.dupe(u8, "保留标题 保留作者 music keep.mp3"),
+        .duration_seconds = 12,
+        .modified_unix = @intCast(keep_stat.mtime),
+    };
+    existing.tracks[1] = .{
+        .path = try arena.dupe(u8, delete_path),
+        .title = try arena.dupe(u8, "待删除"),
+        .artist = try arena.dupe(u8, ""),
+        .album = try arena.dupe(u8, ""),
+        .folder = try arena.dupe(u8, "music"),
+        .search_blob = try arena.dupe(u8, "待删除 music delete.mp3"),
+        .duration_seconds = 3,
+        .modified_unix = @intCast(delete_stat.mtime),
+    };
+    existing.playlists = try buildPlaylists(arena, existing.tracks);
+
+    try tmp.dir.deleteFile("music/delete.mp3");
+    {
+        const file = try tmp.dir.createFile("music/new.mp3", .{});
+        file.close();
+    }
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, "music");
+    defer std.testing.allocator.free(root);
+
+    var summary = try refreshIncremental(std.testing.allocator, &existing, &.{root}, null);
+    defer summary.library.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), summary.library.tracks.len);
+    try std.testing.expect(std.mem.eql(u8, summary.library.tracks[0].path, keep_path) or std.mem.eql(u8, summary.library.tracks[1].path, keep_path));
+
+    var found_keep = false;
+    var found_new = false;
+    for (summary.library.tracks) |track| {
+        if (std.mem.eql(u8, track.path, keep_path)) {
+            found_keep = true;
+            try std.testing.expectEqualStrings("保留标题", track.title);
+            try std.testing.expectEqualStrings("保留作者", track.artist);
+        }
+        if (std.mem.endsWith(u8, track.path, "/new.mp3")) found_new = true;
+        try std.testing.expect(!std.mem.eql(u8, track.path, delete_path));
+    }
+    try std.testing.expect(found_keep);
+    try std.testing.expect(found_new);
 }

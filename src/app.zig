@@ -26,12 +26,14 @@ const FocusPane = enum {
 
 const RightPaneMode = enum {
     songs,
+    artist,
     playlists,
     help,
 
     fn label(self: RightPaneMode) []const u8 {
         return switch (self) {
             .songs => "歌曲",
+            .artist => "作者",
             .playlists => "播放列表",
             .help => "帮助",
         };
@@ -41,6 +43,7 @@ const RightPaneMode = enum {
         return switch (self) {
             .songs => .playlists,
             .playlists => .songs,
+            .artist => .songs,
             .help => .songs,
         };
     }
@@ -95,9 +98,12 @@ const Model = struct {
     dirty: bool = true,
     selected_playlist: usize = 0,
     selected_track: usize = 0,
+    song_view_selected_track: usize = 0,
+    song_view_selected_track_path: []const u8,
     selected_queue: usize = 0,
     playlist_scroll: usize = 0,
     track_scroll: usize = 0,
+    song_view_track_scroll: usize = 0,
     queue_scroll: usize = 0,
     focus: FocusPane = .browser,
     search_mode: bool = false,
@@ -106,6 +112,7 @@ const Model = struct {
     sort_reverse: bool = false,
     search_query: std.ArrayList(u8),
     normalized_query: []const u8,
+    artist_view_name: []const u8,
     spinner_frame: usize = 0,
     status_message: std.ArrayList(u8),
     scan_state: ScanState = .idle,
@@ -170,6 +177,8 @@ const Model = struct {
             .buffer = undefined,
             .search_query = std.ArrayList(u8).empty,
             .normalized_query = try allocator.dupe(u8, ""),
+            .artist_view_name = try allocator.dupe(u8, ""),
+            .song_view_selected_track_path = try allocator.dupe(u8, ""),
             .status_message = std.ArrayList(u8).empty,
         };
         errdefer self.vx.deinit(allocator, self.tty.writer());
@@ -200,6 +209,8 @@ const Model = struct {
 
         self.status_message.deinit(self.allocator);
         self.allocator.free(self.normalized_query);
+        self.allocator.free(self.artist_view_name);
+        self.allocator.free(self.song_view_selected_track_path);
         self.search_query.deinit(self.allocator);
 
         self.allocator.free(self.session_state.selected_playlist_name);
@@ -299,6 +310,7 @@ const Model = struct {
         }
 
         if (key.matches('/', .{})) {
+            if (self.right_pane_mode == .help) return;
             self.search_mode = true;
             try self.setStatus("开始编辑搜索");
             self.dirty = true;
@@ -312,6 +324,10 @@ const Model = struct {
         if (key.matches('t', .{})) {
             self.right_pane_mode = self.right_pane_mode.toggleBrowse();
             self.dirty = true;
+            return;
+        }
+        if (key.matches('a', .{})) {
+            try self.toggleArtistView();
             return;
         }
         if (key.matches('r', .{})) {
@@ -353,6 +369,16 @@ const Model = struct {
             self.dirty = true;
             return;
         }
+        if (key.matches('d', .{ .ctrl = true })) {
+            try self.pageDown();
+            self.dirty = true;
+            return;
+        }
+        if (key.matches('u', .{ .ctrl = true })) {
+            try self.pageUp();
+            self.dirty = true;
+            return;
+        }
         if (self.focus == .queue) {
             if (key.matchesAny(&.{ 'j', vaxis.Key.down }, .{})) self.moveQueueSelection(1);
             if (key.matchesAny(&.{ 'k', vaxis.Key.up }, .{})) self.moveQueueSelection(-1);
@@ -366,7 +392,7 @@ const Model = struct {
                     self.selected_track = 0;
                     self.track_scroll = 0;
                 }
-            } else if (self.right_pane_mode == .songs) {
+            } else if (self.right_pane_mode == .songs or self.right_pane_mode == .artist) {
                 if (key.matchesAny(&.{ 'j', vaxis.Key.down }, .{})) try self.moveTrackSelection(1);
                 if (key.matchesAny(&.{ 'k', vaxis.Key.up }, .{})) try self.moveTrackSelection(-1);
                 if (key.matches(vaxis.Key.enter, .{})) try self.playSelectedTrack();
@@ -396,7 +422,7 @@ const Model = struct {
             self.dirty = true;
             return;
         }
-        if (key.matches('u', .{ .ctrl = true })) {
+        if (key.matches('l', .{ .ctrl = true })) {
             self.search_query.clearRetainingCapacity();
             try self.rebuildSearchQuery();
             self.dirty = true;
@@ -461,6 +487,63 @@ const Model = struct {
         self.dirty = true;
     }
 
+    fn toggleArtistView(self: *Model) !void {
+        if (self.focus != .browser or self.right_pane_mode == .help or self.right_pane_mode == .playlists) return;
+        if (self.right_pane_mode == .artist) {
+            try self.clearArtistView();
+            self.right_pane_mode = .songs;
+            try self.restoreSongViewPosition();
+            try self.setStatus("已返回歌曲视图");
+            self.dirty = true;
+            return;
+        }
+
+        const visible = try self.visibleTracks();
+        defer self.allocator.free(visible);
+        if (visible.len == 0) return;
+
+        const selected = visible[@min(self.selected_track, visible.len - 1)];
+        if (selected.artist.len == 0 and selected.album.len == 0) {
+            try self.jumpToFolderPlaylist(selected.folder);
+            return;
+        }
+        if (selected.artist.len == 0) {
+            try self.setStatus("当前歌曲没有作者信息");
+            self.dirty = true;
+            return;
+        }
+
+        try self.captureSongViewPosition(selected.path);
+        try self.setArtistView(selected.artist);
+        self.right_pane_mode = .artist;
+        self.selected_track = 0;
+        self.track_scroll = 0;
+        try self.setStatusFmt("作者视图：{s}", .{selected.artist});
+        self.dirty = true;
+    }
+
+    fn jumpToFolderPlaylist(self: *Model, folder_name: []const u8) !void {
+        if (folder_name.len == 0) {
+            try self.setStatus("当前歌曲没有可跳转的文件夹");
+            self.dirty = true;
+            return;
+        }
+
+        self.right_pane_mode = .playlists;
+        if (self.findPlaylistByName(folder_name)) |idx| {
+            self.selected_playlist = idx;
+        } else {
+            try self.clearSearchQuery();
+            self.right_pane_mode = .playlists;
+            self.selected_playlist = self.findPlaylistByName(folder_name) orelse 0;
+        }
+        self.playlist_scroll = 0;
+        self.selected_track = 0;
+        self.track_scroll = 0;
+        try self.setStatusFmt("已跳转到文件夹列表：{s}", .{folder_name});
+        self.dirty = true;
+    }
+
     fn startScan(self: *Model) !void {
         if (self.scan_state == .scanning) return;
         if (self.scanner_thread) |thread| {
@@ -470,7 +553,7 @@ const Model = struct {
         self.scan_state = .scanning;
         self.scan_shared.scanned_files = 0;
         self.scan_shared.metadata_failures = 0;
-        try self.setStatus("正在扫描音乐库");
+        try self.setStatus(if (self.library.tracks.len == 0) "正在扫描音乐库" else "正在增量重载曲库");
         self.dirty = true;
         self.scanner_thread = try std.Thread.spawn(.{}, scanMain, .{self});
     }
@@ -482,7 +565,10 @@ const Model = struct {
                 .on_file = scanProgressCallback,
                 .should_cancel = scanShouldCancel,
             };
-            break :blk library_mod.scan(self.allocator, self.loaded_config.config.music_roots, &progress);
+            break :blk if (self.library.tracks.len == 0)
+                library_mod.scan(self.allocator, self.loaded_config.config.music_roots, &progress)
+            else
+                library_mod.refreshIncremental(self.allocator, &self.library, self.loaded_config.config.music_roots, &progress);
         };
 
         if (result) |scan| {
@@ -533,6 +619,7 @@ const Model = struct {
         const metadata_failures = self.scan_shared.metadata_failures;
         self.scan_shared.mutex.unlock();
 
+        const was_empty = self.library.tracks.len == 0;
         self.database.saveLibrary(&result.library) catch {};
         self.library.deinit();
         self.library = result.library;
@@ -545,9 +632,13 @@ const Model = struct {
         self.track_scroll = 0;
         try self.reconcileVisibleState();
         if (metadata_failures > 0) {
-            try self.setStatusFmt("扫描完成（{d} 首使用回退元数据）", .{metadata_failures});
+            if (was_empty) {
+                try self.setStatusFmt("扫描完成（{d} 首使用回退元数据）", .{metadata_failures});
+            } else {
+                try self.setStatusFmt("重载完成（{d} 首使用回退元数据）", .{metadata_failures});
+            }
         } else {
-            try self.setStatus("扫描完成");
+            try self.setStatus(if (was_empty) "扫描完成" else "重载完成");
         }
         self.dirty = true;
     }
@@ -594,8 +685,8 @@ const Model = struct {
 
         try self.drawHeader(frame_alloc, root, screen_width);
 
-        const header_h: u16 = 2;
-        const footer_h: u16 = 2;
+        const header_h: u16 = 3;
+        const footer_h: u16 = 1;
         const body_y = header_h;
         const body_h = screen_height - header_h - footer_h;
         const queue_w = @max(screen_width / 3, 28);
@@ -605,22 +696,30 @@ const Model = struct {
             .y_off = body_y,
             .width = queue_w,
             .height = body_h,
-            .border = .{ .where = .all },
+            .border = .{
+                .where = .all,
+                .style = paneBorderStyle(self.focus == .queue),
+            },
         });
         const browser_outer = root.child(.{
             .x_off = @intCast(queue_w),
             .y_off = body_y,
             .width = browser_w,
             .height = body_h,
-            .border = .{ .where = .all },
+            .border = .{
+                .where = .all,
+                .style = paneBorderStyle(self.focus == .browser),
+            },
         });
 
         try self.drawQueue(frame_alloc, queue_outer);
         switch (self.right_pane_mode) {
             .songs => try self.drawTracks(frame_alloc, browser_outer),
+            .artist => try self.drawTracks(frame_alloc, browser_outer),
             .playlists => try self.drawPlaylists(frame_alloc, browser_outer),
             .help => try self.drawHelpPage(frame_alloc, browser_outer),
         }
+        try self.drawPaneTitleBoxes(frame_alloc, root, body_y, queue_w, browser_w);
         try self.drawFooter(frame_alloc, root, screen_width, screen_height);
 
         try self.vx.render(self.tty.writer());
@@ -638,8 +737,7 @@ const Model = struct {
             .failed => "错误",
         };
         const visible_files = if (self.scan_state == .scanning) scanned_files else self.library.tracks.len;
-        const title = try std.fmt.allocPrint(frame_alloc, "ZZYinYue  模式:{s}  扫描:{s}  文件:{d}", .{
-            playModeChineseLabel(self.playback.play_mode),
+        const title = try std.fmt.allocPrint(frame_alloc, "自在音乐 {s} 已加载{d}文件", .{
             scan_label,
             visible_files,
         });
@@ -659,23 +757,10 @@ const Model = struct {
             .wrap = .none,
         });
 
-        const sort_label = try std.fmt.allocPrint(frame_alloc, "排序:{s}{s}", .{
-            sortModeChineseLabel(self.sort_mode),
-            if (self.sort_reverse) " 倒序" else " 正序",
-        });
-        const status_col = if (sort_label.len + 1 >= width) 0 else width - @as(u16, @intCast(sort_label.len));
-        _ = root.print(&.{seg(sort_label, styleMuted())}, .{
-            .row_offset = 1,
-            .col_offset = status_col,
-            .wrap = .none,
-        });
     }
 
     fn drawQueue(self: *Model, frame_alloc: std.mem.Allocator, win: vaxis.Window) !void {
         const items = self.playback.queueItems();
-        const title = try std.fmt.allocPrint(frame_alloc, "播放队列 [{d}]", .{items.len});
-        _ = win.print(&.{seg(title, paneTitleStyle(self.focus == .queue))}, .{ .wrap = .none });
-
         const rows = contentRows(win);
         const current_idx = self.playback.currentQueueIndex();
         if (items.len == 0) {
@@ -709,9 +794,6 @@ const Model = struct {
         const playlists = try self.filteredPlaylists();
         defer self.allocator.free(playlists);
 
-        const title = try std.fmt.allocPrint(frame_alloc, "播放列表 [{d}]", .{playlists.len});
-        _ = win.print(&.{seg(title, paneTitleStyle(self.focus == .browser and self.right_pane_mode == .playlists))}, .{ .wrap = .none });
-
         const rows = contentRows(win);
         self.playlist_scroll = keepSelectionVisible(
             self.playlist_scroll,
@@ -743,26 +825,22 @@ const Model = struct {
         const tracks = try self.visibleTracks();
         defer self.allocator.free(tracks);
 
-        const title = try std.fmt.allocPrint(frame_alloc, "歌曲 [{s}{s}]  {d}", .{
-            sortModeChineseLabel(self.sort_mode),
-            if (self.sort_reverse) " 倒序" else " 正序",
-            tracks.len,
-        });
-        _ = win.print(&.{seg(title, paneTitleStyle(self.focus == .browser and self.right_pane_mode == .songs))}, .{ .wrap = .none });
-
         const rows = contentRows(win);
+        const detail_rows: usize = if (rows >= 6) 2 else 0;
+        const separator_rows: usize = if (detail_rows > 0) 1 else 0;
+        const list_rows = rows -| detail_rows -| separator_rows;
         self.track_scroll = keepSelectionVisible(
             self.track_scroll,
             self.selected_track,
             tracks.len,
-            rows,
+            list_rows,
         );
 
-        for (0..rows) |row| {
+        for (0..list_rows) |row| {
             const idx = self.track_scroll + row;
             if (idx >= tracks.len) break;
             const track = tracks[idx];
-            const selected = idx == self.selected_track and self.focus == .browser and self.right_pane_mode == .songs;
+            const selected = idx == self.selected_track and self.focus == .browser and (self.right_pane_mode == .songs or self.right_pane_mode == .artist);
             if (selected) try paintRowBackground(frame_alloc, win, @intCast(row + 1), styleSelected());
             const line = try formatTrackLine(frame_alloc, track, contentWidth(win), true);
             _ = win.print(&.{seg(line.left, if (selected) styleSelected() else .{})}, .{
@@ -779,6 +857,8 @@ const Model = struct {
                 });
             }
         }
+
+        if (detail_rows > 0) try self.drawSelectedTrackDetails(frame_alloc, win, tracks, list_rows);
     }
 
     fn drawFooter(self: *Model, frame_alloc: std.mem.Allocator, root: vaxis.Window, width: u16, height: u16) !void {
@@ -791,24 +871,21 @@ const Model = struct {
             "[播放]";
 
         const song_name = self.currentTrackDisplayName();
-        const line1_raw = try std.fmt.allocPrint(frame_alloc, "{s} {s} {s}", .{ state_icon, song_name, try self.progressText(frame_alloc) });
-        const line1 = try clipText(frame_alloc, line1_raw, width);
-        _ = root.print(&.{seg(line1, styleFooter())}, .{
-            .row_offset = height - 2,
-            .col_offset = centeredColumn(width, line1),
-            .wrap = .none,
+        const line1_raw = try std.fmt.allocPrint(frame_alloc, "{s} {s}  模式:{s}  {s}", .{
+            state_icon,
+            song_name,
+            playModeChineseLabel(self.playback.play_mode),
+            try self.progressText(frame_alloc),
         });
-
-        const line2 = try clipText(frame_alloc, self.status_message.items, width);
-        _ = root.print(&.{seg(line2, styleMuted())}, .{
+        const line1 = try clipText(frame_alloc, line1_raw, width);
+        _ = root.print(&.{seg(line1, styleFooter(self.playback.paused))}, .{
             .row_offset = height - 1,
-            .col_offset = centeredColumn(width, line2),
+            .col_offset = 0,
             .wrap = .none,
         });
     }
 
     fn drawHelpPage(_: *Model, frame_alloc: std.mem.Allocator, win: vaxis.Window) !void {
-        _ = win.print(&.{seg("按键帮助", paneTitleStyle(true))}, .{ .wrap = .none });
         _ = win.print(&.{seg("q 退出    Tab 切换焦点    Enter 确认/播放    空格 暂停", .{})}, .{
             .row_offset = 1,
             .col_offset = 0,
@@ -819,24 +896,29 @@ const Model = struct {
             .col_offset = 0,
             .wrap = .none,
         });
-        _ = win.print(&.{seg("/ 编辑搜索    s 切换排序    v 倒序    t 切换歌曲/列表", .{})}, .{
+        _ = win.print(&.{seg("/ 编辑搜索（帮助页禁用）    s 切换排序    v 倒序    t 切换歌曲/列表", .{})}, .{
             .row_offset = 3,
             .col_offset = 0,
             .wrap = .none,
         });
-        _ = win.print(&.{seg("? 进入/离开帮助页    Esc 结束搜索    Ctrl-U 清空搜索", .{})}, .{
+        _ = win.print(&.{seg("a 作者视图/返回    ? 进入/离开帮助页", .{})}, .{
             .row_offset = 4,
             .col_offset = 0,
             .wrap = .none,
         });
+        _ = win.print(&.{seg("Ctrl-D/Ctrl-U 翻页    Esc 结束搜索    Ctrl-L 清空搜索", .{})}, .{
+            .row_offset = 5,
+            .col_offset = 0,
+            .wrap = .none,
+        });
         _ = win.print(&.{seg("左侧：播放队列    右侧：歌曲 / 播放列表 / 帮助", styleMuted())}, .{
-            .row_offset = 6,
+            .row_offset = 7,
             .col_offset = 0,
             .wrap = .none,
         });
         const note = try clipText(frame_alloc, "搜索框固定在顶部；高亮覆盖整行；退格按 UTF-8 字符删除。", contentWidth(win));
         _ = win.print(&.{seg(note, styleMuted())}, .{
-            .row_offset = 7,
+            .row_offset = 8,
             .col_offset = 0,
             .wrap = .none,
         });
@@ -886,6 +968,25 @@ const Model = struct {
     }
 
     fn visibleTracks(self: *Model) ![]domain.Track {
+        if (self.right_pane_mode == .artist) {
+            var artist_tracks = std.ArrayList(domain.Track).empty;
+            errdefer artist_tracks.deinit(self.allocator);
+
+            for (self.library.tracks) |track| {
+                if (!self.trackMatchesArtistView(track)) continue;
+                if (!self.shouldIncludeTrack(track)) continue;
+                try artist_tracks.append(self.allocator, track);
+            }
+
+            self.sortTracks(artist_tracks.items);
+            if (artist_tracks.items.len == 0) {
+                self.selected_track = 0;
+            } else {
+                self.selected_track = @min(self.selected_track, artist_tracks.items.len - 1);
+            }
+            return artist_tracks.toOwnedSlice(self.allocator);
+        }
+
         const playlists = try self.filteredPlaylists();
         defer self.allocator.free(playlists);
         if (playlists.len == 0) return self.allocator.alloc(domain.Track, 0);
@@ -927,8 +1028,14 @@ const Model = struct {
     }
 
     fn shouldIncludeTrack(self: *Model, track: domain.Track) bool {
-        if (self.right_pane_mode != .songs) return true;
+        if (self.right_pane_mode != .songs and self.right_pane_mode != .artist) return true;
         return domain.containsNormalized(track.search_blob, self.normalized_query);
+    }
+
+    fn trackMatchesArtistView(self: *Model, track: domain.Track) bool {
+        if (self.artist_view_name.len == 0) return false;
+        return std.mem.eql(u8, track.artist, self.artist_view_name) or
+            std.ascii.eqlIgnoreCase(track.artist, self.artist_view_name);
     }
 
     fn sortTracks(self: *Model, tracks: []domain.Track) void {
@@ -999,6 +1106,15 @@ const Model = struct {
         defer self.allocator.free(initial_tracks);
         if (initial_tracks.len > 0 or self.library.tracks.len == 0) return;
 
+        if (self.right_pane_mode == .artist) {
+            try self.clearArtistView();
+            self.right_pane_mode = .songs;
+            try self.restoreSongViewPosition();
+            const artist_fallback = try self.visibleTracks();
+            defer self.allocator.free(artist_fallback);
+            if (artist_fallback.len > 0) return;
+        }
+
         self.selected_playlist = 0;
         self.selected_track = 0;
         self.playlist_scroll = 0;
@@ -1058,6 +1174,172 @@ const Model = struct {
         const message = try std.fmt.allocPrint(self.allocator, fmt, args);
         defer self.allocator.free(message);
         try self.setStatus(message);
+    }
+
+    fn setArtistView(self: *Model, artist: []const u8) !void {
+        self.allocator.free(self.artist_view_name);
+        self.artist_view_name = try self.allocator.dupe(u8, artist);
+    }
+
+    fn clearArtistView(self: *Model) !void {
+        self.allocator.free(self.artist_view_name);
+        self.artist_view_name = try self.allocator.dupe(u8, "");
+    }
+
+    fn clearSearchQuery(self: *Model) !void {
+        self.search_query.clearRetainingCapacity();
+        try self.rebuildSearchQuery();
+    }
+
+    fn drawPaneTitleBoxes(
+        self: *Model,
+        frame_alloc: std.mem.Allocator,
+        root: vaxis.Window,
+        body_y: u16,
+        queue_w: u16,
+        browser_w: u16,
+    ) !void {
+        const queue_title = try std.fmt.allocPrint(frame_alloc, "播放队列 [{d}]", .{self.playback.queueItems().len});
+        try drawPaneTitleBox(frame_alloc, root, 2, body_y -| 1, queue_w -| 4, queue_title, self.focus == .queue);
+
+        const browser_title = try self.browserPaneTitle(frame_alloc);
+        try drawPaneTitleBox(
+            frame_alloc,
+            root,
+            queue_w + 2,
+            body_y -| 1,
+            browser_w -| 4,
+            browser_title,
+            self.focus == .browser,
+        );
+    }
+
+    fn browserPaneTitle(self: *Model, frame_alloc: std.mem.Allocator) ![]const u8 {
+        return switch (self.right_pane_mode) {
+            .songs => blk: {
+                const visible = try self.visibleTracks();
+                defer self.allocator.free(visible);
+                break :blk std.fmt.allocPrint(frame_alloc, "歌曲 [{s}{s} | {d}]", .{
+                    sortModeChineseLabel(self.sort_mode),
+                    if (self.sort_reverse) " 倒序" else " 正序",
+                    visible.len,
+                });
+            },
+            .artist => blk: {
+                const visible = try self.visibleTracks();
+                defer self.allocator.free(visible);
+                break :blk std.fmt.allocPrint(frame_alloc, "作者：{s} [{d}]", .{
+                    fallbackText(self.artist_view_name, "未知"),
+                    visible.len,
+                });
+            },
+            .playlists => std.fmt.allocPrint(frame_alloc, "播放列表 [{d}]", .{self.filteredPlaylistsCount()}),
+            .help => frame_alloc.dupe(u8, "按键帮助"),
+        };
+    }
+
+    fn captureSongViewPosition(self: *Model, selected_path: []const u8) !void {
+        self.song_view_selected_track = self.selected_track;
+        self.song_view_track_scroll = self.track_scroll;
+        self.allocator.free(self.song_view_selected_track_path);
+        self.song_view_selected_track_path = try self.allocator.dupe(u8, selected_path);
+    }
+
+    fn restoreSongViewPosition(self: *Model) !void {
+        self.selected_track = self.song_view_selected_track;
+        self.track_scroll = self.song_view_track_scroll;
+        if (self.song_view_selected_track_path.len == 0) return;
+
+        const visible = try self.visibleTracks();
+        defer self.allocator.free(visible);
+        for (visible, 0..) |track, idx| {
+            if (std.mem.eql(u8, track.path, self.song_view_selected_track_path)) {
+                self.selected_track = idx;
+                break;
+            }
+        }
+    }
+
+    fn pageDown(self: *Model) !void {
+        const amount = self.pageStep();
+        if (amount == 0) return;
+        if (self.focus == .queue) {
+            self.moveQueueSelection(@intCast(amount));
+            return;
+        }
+        if (self.right_pane_mode == .playlists) {
+            self.movePlaylistSelection(@intCast(amount));
+            return;
+        }
+        if (self.right_pane_mode == .songs or self.right_pane_mode == .artist) {
+            try self.moveTrackSelection(@intCast(amount));
+        }
+    }
+
+    fn pageUp(self: *Model) !void {
+        const amount = self.pageStep();
+        if (amount == 0) return;
+        const delta: isize = -@as(isize, @intCast(amount));
+        if (self.focus == .queue) {
+            self.moveQueueSelection(delta);
+            return;
+        }
+        if (self.right_pane_mode == .playlists) {
+            self.movePlaylistSelection(delta);
+            return;
+        }
+        if (self.right_pane_mode == .songs or self.right_pane_mode == .artist) {
+            try self.moveTrackSelection(delta);
+        }
+    }
+
+    fn pageStep(self: *const Model) usize {
+        if (self.vx.screen.height <= 6) return 1;
+        const header_h: usize = 3;
+        const footer_h: usize = 1;
+        const body_h = self.vx.screen.height -| header_h -| footer_h;
+        const content_rows = body_h -| 1;
+        if (self.focus == .queue or self.right_pane_mode == .playlists) return @max(@as(usize, 1), content_rows);
+        const detail_rows: usize = if (content_rows >= 6) 2 else 0;
+        const separator_rows: usize = if (detail_rows > 0) 1 else 0;
+        return @max(@as(usize, 1), content_rows -| detail_rows -| separator_rows);
+    }
+
+    fn drawSelectedTrackDetails(
+        self: *Model,
+        frame_alloc: std.mem.Allocator,
+        win: vaxis.Window,
+        tracks: []const domain.Track,
+        list_rows: usize,
+    ) !void {
+        if (tracks.len == 0) return;
+
+        const selected = tracks[@min(self.selected_track, tracks.len - 1)];
+        const separator_row: u16 = @intCast(list_rows + 1);
+        const detail_row: u16 = separator_row + 1;
+        const label_style: vaxis.Style = if (self.focus == .browser) .{ .bold = true } else styleMuted();
+        const value_width = contentWidth(win);
+
+        const separator = try clipText(frame_alloc, "──────────", value_width);
+        _ = win.print(&.{seg(separator, styleMuted())}, .{
+            .row_offset = separator_row,
+            .col_offset = 0,
+            .wrap = .none,
+        });
+
+        const artist_line = try std.fmt.allocPrint(frame_alloc, "作者：{s}", .{fallbackText(selected.artist, "未知")});
+        _ = win.print(&.{seg(try clipText(frame_alloc, artist_line, value_width), label_style)}, .{
+            .row_offset = detail_row,
+            .col_offset = 0,
+            .wrap = .none,
+        });
+
+        const album_line = try std.fmt.allocPrint(frame_alloc, "专辑：{s}", .{fallbackText(selected.album, "未知")});
+        _ = win.print(&.{seg(try clipText(frame_alloc, album_line, value_width), styleMuted())}, .{
+            .row_offset = detail_row + 1,
+            .col_offset = 0,
+            .wrap = .none,
+        });
     }
 };
 
@@ -1126,17 +1408,7 @@ const FormattedTrackLine = struct {
 
 fn formatTrackLine(allocator: std.mem.Allocator, track: domain.Track, max_chars: usize, include_duration: bool) !FormattedTrackLine {
     const title = track.displayName();
-    const artist = fallbackText(track.artist, "");
-    const album = fallbackText(track.album, "");
-
-    const raw = if (artist.len == 0 and album.len == 0)
-        try std.fmt.allocPrint(allocator, "{s}", .{title})
-    else if (artist.len > 0 and album.len == 0)
-        try std.fmt.allocPrint(allocator, "{s} - {s}", .{ title, artist })
-    else if (artist.len == 0 and album.len > 0)
-        try std.fmt.allocPrint(allocator, "{s} / {s}", .{ title, album })
-    else
-        try std.fmt.allocPrint(allocator, "{s} - {s} / {s}", .{ title, artist, album });
+    const raw = try std.fmt.allocPrint(allocator, "{s}", .{title});
 
     if (!include_duration) {
         return .{
@@ -1212,17 +1484,52 @@ fn styleMuted() vaxis.Style {
     };
 }
 
-fn styleFooter() vaxis.Style {
+fn styleFooter(paused: bool) vaxis.Style {
+    if (paused) {
+        return .{
+            .fg = .{ .index = 15 },
+            .bg = .{ .index = 4 },
+            .bold = true,
+        };
+    }
     return .{
         .fg = .{ .index = 15 },
-        .bg = .{ .index = 4 },
         .bold = true,
     };
 }
 
-fn paneTitleStyle(active: bool) vaxis.Style {
-    if (active) return styleSelected();
+fn paneTitleStyle(_: bool) vaxis.Style {
     return .{ .bold = true };
+}
+
+fn paneBorderStyle(active: bool) vaxis.Style {
+    if (active) {
+        return .{
+            .fg = .{ .index = 12 },
+            .bold = true,
+        };
+    }
+    return styleMuted();
+}
+
+fn drawPaneTitleBox(
+    frame_alloc: std.mem.Allocator,
+    root: vaxis.Window,
+    x: u16,
+    y: u16,
+    max_width: u16,
+    title: []const u8,
+    active: bool,
+) !void {
+    if (max_width <= 4) return;
+    const inner_width = @as(usize, @intCast(max_width - 4));
+    const clipped = try clipText(frame_alloc, title, inner_width);
+    const tab = try std.fmt.allocPrint(frame_alloc, "┌ {s} ┐", .{clipped});
+    _ = root.print(&.{seg(tab, paneBorderStyle(active))}, .{
+        .row_offset = y,
+        .col_offset = x,
+        .wrap = .none,
+    });
 }
 
 fn fallbackText(value: []const u8, fallback: []const u8) []const u8 {

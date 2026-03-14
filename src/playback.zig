@@ -93,12 +93,19 @@ pub const Controller = struct {
     pub fn next(self: *Controller) !void {
         if (self.queue.items.len == 0) return;
         if (self.current_index == null) {
-            self.current_index = 0;
+            self.current_index = if (self.play_mode == .playlist_shuffle)
+                self.randomNextIndex(null)
+            else
+                0;
             return try self.loadCurrent();
         }
-        const current = self.current_index.?;
-        const next_index = if (current + 1 >= self.queue.items.len) 0 else current + 1;
-        self.current_index = next_index;
+        self.current_index = switch (self.play_mode) {
+            .playlist_shuffle => self.randomNextIndex(self.current_index),
+            else => blk: {
+                const current = self.current_index.?;
+                break :blk if (current + 1 >= self.queue.items.len) 0 else current + 1;
+            },
+        };
         try self.loadCurrent();
     }
 
@@ -158,11 +165,17 @@ pub const Controller = struct {
             .playlist_loop => try self.next(),
             .playlist_shuffle => {
                 if (self.queue.items.len == 0) return;
-                const index = if (self.queue.items.len == 1) 0 else self.prng.random().uintLessThan(usize, self.queue.items.len);
-                self.current_index = index;
+                self.current_index = self.randomNextIndex(self.current_index);
                 try self.loadCurrent();
             },
         }
+    }
+
+    fn randomNextIndex(self: *Controller, current: ?usize) usize {
+        if (self.queue.items.len <= 1) return 0;
+        const current_index = current orelse return self.prng.random().uintLessThan(usize, self.queue.items.len);
+        const candidate = self.prng.random().uintLessThan(usize, self.queue.items.len - 1);
+        return if (candidate >= current_index) candidate + 1 else candidate;
     }
 
     fn loadCurrent(self: *Controller) !void {
