@@ -1,4 +1,5 @@
 const std = @import("std");
+const ui_strings = @import("ui_strings").Strings;
 
 pub const PlayMode = enum {
     single_loop,
@@ -29,9 +30,9 @@ pub const PlaylistKind = enum {
 
     pub fn label(self: PlaylistKind) []const u8 {
         return switch (self) {
-            .folder => "文件夹",
-            .artist => "单曲",
-            .album => "专辑",
+            .folder => ui_strings.playlist_kind.folder,
+            .artist => ui_strings.playlist_kind.artist,
+            .album => ui_strings.playlist_kind.album,
         };
     }
 };

@@ -7,6 +7,15 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const generate_strings = b.addSystemCommand(&.{ "python3" });
+    generate_strings.addFileArg(b.path("tools/generate_strings.py"));
+    generate_strings.addFileArg(b.path("ui_strings.json"));
+    const generated_strings = generate_strings.addOutputFileArg("ui_strings.zig");
+    const strings_mod = b.createModule(.{
+        .root_source_file = generated_strings,
+        .target = target,
+        .optimize = optimize,
+    });
 
     const lib_mod = b.addModule("ZZYinYue", .{
         .root_source_file = b.path("src/root.zig"),
@@ -15,6 +24,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     lib_mod.addImport("vaxis", vaxis_dep.module("vaxis"));
+    lib_mod.addImport("ui_strings", strings_mod);
     lib_mod.linkSystemLibrary("sqlite3", .{});
     lib_mod.linkSystemLibrary("mpv", .{});
     lib_mod.linkSystemLibrary("avformat", .{});
@@ -29,6 +39,7 @@ pub fn build(b: *std.Build) void {
     });
     exe_mod.addImport("ZZYinYue", lib_mod);
     exe_mod.addImport("vaxis", vaxis_dep.module("vaxis"));
+    exe_mod.addImport("ui_strings", strings_mod);
     exe_mod.linkSystemLibrary("sqlite3", .{});
     exe_mod.linkSystemLibrary("mpv", .{});
     exe_mod.linkSystemLibrary("avformat", .{});
@@ -56,6 +67,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     lib_tests_mod.addImport("vaxis", vaxis_dep.module("vaxis"));
+    lib_tests_mod.addImport("ui_strings", strings_mod);
     lib_tests_mod.linkSystemLibrary("sqlite3", .{});
     lib_tests_mod.linkSystemLibrary("mpv", .{});
     lib_tests_mod.linkSystemLibrary("avformat", .{});

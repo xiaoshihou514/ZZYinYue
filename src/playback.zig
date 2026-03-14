@@ -1,5 +1,6 @@
 const std = @import("std");
 const domain = @import("domain.zig");
+const ui_strings = @import("ui_strings").Strings;
 
 const c = @cImport({
     @cInclude("mpv/client.h");
@@ -204,7 +205,7 @@ pub const Controller = struct {
     fn setErrorForCurrentTrack(self: *Controller, code: c_int) !void {
         self.clearError();
         const path = self.currentPath();
-        self.last_error = try std.fmt.allocPrint(self.allocator, "播放失败：{s} ({s})", .{
+        self.last_error = try std.fmt.allocPrint(self.allocator, ui_strings.playback.error_fmt, .{
             std.fs.path.basename(path),
             c.mpv_error_string(code),
         });

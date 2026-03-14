@@ -6,6 +6,7 @@ const domain = @import("domain.zig");
 const library_mod = @import("library.zig");
 const playback = @import("playback.zig");
 const storage = @import("storage.zig");
+const ui_strings = @import("ui_strings").Strings;
 
 const Event = union(enum) {
     key_press: vaxis.Key,
@@ -37,10 +38,10 @@ const RightPaneMode = enum {
 
     fn label(self: RightPaneMode) []const u8 {
         return switch (self) {
-            .songs => "歌曲",
-            .artist => "关联",
-            .playlists => "播放列表",
-            .help => "帮助",
+            .songs => ui_strings.pane.songs,
+            .artist => ui_strings.pane.related,
+            .playlists => ui_strings.pane.playlists,
+            .help => ui_strings.pane.help,
         };
     }
 
@@ -197,9 +198,9 @@ const Model = struct {
         try self.rebuildSearchQuery();
         try self.reconcileVisibleState();
         if (self.library.tracks.len > 0) {
-            try self.setStatusFmt("已加载缓存曲库（{d} 首）", .{self.library.tracks.len});
+            try self.setStatusFmt(ui_strings.status.cached_loaded_fmt, .{self.library.tracks.len});
         } else {
-            try self.setStatus("就绪");
+            try self.setStatus(ui_strings.status.ready);
         }
         return self;
     }
@@ -320,7 +321,7 @@ const Model = struct {
         if (key.matches('/', .{})) {
             if (self.right_pane_mode == .help) return;
             self.search_mode = true;
-            try self.setStatus("开始编辑搜索");
+            try self.setStatus(ui_strings.status.search_editing);
             self.dirty = true;
             return;
         }
@@ -350,14 +351,16 @@ const Model = struct {
         }
         if (key.matches('s', .{})) {
             self.sort_mode = self.sort_mode.next();
-            try self.setStatusFmt("排序：{s}", .{sortModeChineseLabel(self.sort_mode)});
+            try self.setStatusFmt(ui_strings.status.sort_fmt, .{sortModeChineseLabel(self.sort_mode)});
             self.track_scroll = 0;
             self.dirty = true;
             return;
         }
         if (key.matches('v', .{})) {
             self.sort_reverse = !self.sort_reverse;
-            try self.setStatusFmt("倒序：{s}", .{if (self.sort_reverse) "开" else "关"});
+            try self.setStatusFmt(ui_strings.status.reverse_fmt, .{
+                if (self.sort_reverse) ui_strings.status.reverse_enabled else ui_strings.status.reverse_disabled,
+            });
             self.track_scroll = 0;
             self.dirty = true;
             return;
@@ -413,14 +416,14 @@ const Model = struct {
         if (isEscapeKey(key) or key.matches(vaxis.Key.enter, .{})) {
             self.search_mode = false;
             try self.rebuildSearchQuery();
-            try self.setStatus("已应用搜索");
+            try self.setStatus(ui_strings.status.search_applied);
             self.dirty = true;
             return;
         }
         if (key.matches(vaxis.Key.tab, .{})) {
             self.right_pane_mode = self.right_pane_mode.toggleBrowse();
             try self.rebuildSearchQuery();
-            try self.setStatusFmt("搜索目标：{s}", .{self.right_pane_mode.label()});
+            try self.setStatusFmt(ui_strings.status.search_target_fmt, .{self.right_pane_mode.label()});
             self.dirty = true;
             return;
         }
@@ -449,7 +452,7 @@ const Model = struct {
         if (self.right_pane_mode == .help) {
             self.right_pane_mode = .songs;
             self.focus = .browser;
-            try self.setStatus("已退出帮助页");
+            try self.setStatus(ui_strings.status.help_closed);
             self.dirty = true;
             return;
         }
@@ -458,14 +461,14 @@ const Model = struct {
             self.right_pane_mode = .songs;
             self.focus = .browser;
             try self.restoreSongViewPosition();
-            try self.setStatus("已返回歌曲视图");
+            try self.setStatus(ui_strings.status.songs_view_restored);
             self.dirty = true;
             return;
         }
         if (self.right_pane_mode == .playlists) {
             self.right_pane_mode = .songs;
             self.focus = .browser;
-            try self.setStatus("已返回歌曲视图");
+            try self.setStatus(ui_strings.status.songs_view_restored);
             self.dirty = true;
             return;
         }
@@ -509,7 +512,7 @@ const Model = struct {
         const items = self.playback.queueItems();
         if (items.len == 0) return;
         try self.playback.playQueueIndex(self.selected_queue);
-        try self.setStatus("开始播放队列曲目");
+        try self.setStatus(ui_strings.status.queue_play_started);
         self.dirty = true;
     }
 
@@ -521,7 +524,7 @@ const Model = struct {
         try self.playback.setQueueFromTracks(visible, self.selected_track);
         self.selected_queue = self.selected_track;
         self.queue_scroll = 0;
-        try self.setStatus("开始播放");
+        try self.setStatus(ui_strings.status.play_started);
         self.dirty = true;
     }
 
@@ -531,7 +534,7 @@ const Model = struct {
             try self.clearArtistView();
             self.right_pane_mode = .songs;
             try self.restoreSongViewPosition();
-            try self.setStatus("已返回歌曲视图");
+            try self.setStatus(ui_strings.status.songs_view_restored);
             self.dirty = true;
             return;
         }
@@ -545,17 +548,17 @@ const Model = struct {
         if (selected.artist.len > 0) {
             try self.setArtistView(selected.artist);
             self.related_view_kind = .artist;
-            try self.setStatusFmt("关联视图：作者 {s}", .{selected.artist});
+            try self.setStatusFmt(ui_strings.status.related_artist_fmt, .{selected.artist});
         } else {
             const folder_path = std.fs.path.dirname(selected.path) orelse "";
             if (folder_path.len == 0) {
-                try self.setStatus("当前歌曲没有可用的目录范围");
+                try self.setStatus(ui_strings.status.no_directory_scope);
                 self.dirty = true;
                 return;
             }
             try self.setArtistView(folder_path);
             self.related_view_kind = .folder;
-            try self.setStatusFmt("关联视图：目录 {s}", .{std.fs.path.basename(folder_path)});
+            try self.setStatusFmt(ui_strings.status.related_folder_fmt, .{std.fs.path.basename(folder_path)});
         }
         self.right_pane_mode = .artist;
         self.selected_track = 0;
@@ -572,7 +575,10 @@ const Model = struct {
         self.scan_state = .scanning;
         self.scan_shared.scanned_files = 0;
         self.scan_shared.metadata_failures = 0;
-        try self.setStatus(if (self.library.tracks.len == 0) "正在扫描音乐库" else "正在增量重载曲库");
+        try self.setStatus(if (self.library.tracks.len == 0)
+            ui_strings.status.scan_start_initial
+        else
+            ui_strings.status.scan_start_reload);
         self.dirty = true;
         self.scanner_thread = try std.Thread.spawn(.{}, scanMain, .{self});
     }
@@ -602,7 +608,7 @@ const Model = struct {
         } else |err| switch (err) {
             error.ScanCancelled => return,
             else => {
-            const message = std.fmt.allocPrint(self.allocator, "扫描失败：{}", .{err}) catch return;
+            const message = std.fmt.allocPrint(self.allocator, ui_strings.status.scan_failed_fmt, .{err}) catch return;
             self.scan_shared.mutex.lock();
             defer self.scan_shared.mutex.unlock();
             self.scan_shared.error_message = message;
@@ -654,12 +660,12 @@ const Model = struct {
         try self.reconcileVisibleState();
         if (metadata_failures > 0) {
             if (was_empty) {
-                try self.setStatusFmt("扫描完成（{d} 首使用回退元数据）", .{metadata_failures});
+                try self.setStatusFmt(ui_strings.status.scan_complete_with_fallback_fmt, .{metadata_failures});
             } else {
-                try self.setStatusFmt("重载完成（{d} 首使用回退元数据）", .{metadata_failures});
+                try self.setStatusFmt(ui_strings.status.reload_complete_with_fallback_fmt, .{metadata_failures});
             }
         } else {
-            try self.setStatus(if (was_empty) "扫描完成" else "重载完成");
+            try self.setStatus(if (was_empty) ui_strings.status.scan_complete else ui_strings.status.reload_complete);
         }
         self.dirty = true;
     }
@@ -671,11 +677,11 @@ const Model = struct {
         }
 
         self.scan_shared.mutex.lock();
-        const message = self.scan_shared.error_message orelse "扫描失败";
+        const message = self.scan_shared.error_message orelse ui_strings.status.scan_failed_generic;
         self.scan_shared.error_message = null;
         self.scan_shared.mutex.unlock();
 
-        defer if (message.ptr != "扫描失败".ptr) self.allocator.free(message);
+        defer if (message.ptr != ui_strings.status.scan_failed_generic.ptr) self.allocator.free(message);
         self.scan_state = .failed;
         try self.setStatus(message);
         self.dirty = true;
@@ -694,7 +700,7 @@ const Model = struct {
         const screen_height = self.vx.screen.height;
 
         if (screen_height < 8 or screen_width < 50) {
-            _ = root.print(&.{seg("终端窗口太小", styleSelected())}, .{
+            _ = root.print(&.{seg(ui_strings.app.terminal_too_small, styleSelected())}, .{
                 .row_offset = 1,
                 .col_offset = 2,
                 .wrap = .none,
@@ -706,7 +712,7 @@ const Model = struct {
 
         try self.drawHeader(frame_alloc, root, screen_width);
 
-        const header_h: u16 = 3;
+        const header_h: u16 = 2;
         const footer_h: u16 = 1;
         const body_y = header_h;
         const body_h = screen_height - header_h - footer_h;
@@ -740,6 +746,7 @@ const Model = struct {
             .playlists => try self.drawPlaylists(frame_alloc, browser_outer),
             .help => try self.drawHelpPage(frame_alloc, browser_outer),
         }
+        try self.drawSearchField(frame_alloc, root, queue_w, body_y);
         try self.drawPaneTitleBoxes(frame_alloc, root, body_y, queue_w, browser_w);
         try self.drawFooter(frame_alloc, root, screen_width, screen_height);
 
@@ -747,37 +754,37 @@ const Model = struct {
         self.dirty = false;
     }
 
-    fn drawHeader(self: *Model, frame_alloc: std.mem.Allocator, root: vaxis.Window, width: u16) !void {
+    fn drawHeader(self: *Model, frame_alloc: std.mem.Allocator, root: vaxis.Window, _: u16) !void {
         const spinner = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
         self.scan_shared.mutex.lock();
         const scanned_files = self.scan_shared.scanned_files;
         self.scan_shared.mutex.unlock();
         const scan_label = switch (self.scan_state) {
-            .idle, .applied => "空闲",
+            .idle, .applied => ui_strings.app.idle,
             .scanning => spinner[self.spinner_frame % spinner.len],
-            .failed => "错误",
+            .failed => ui_strings.app.@"error",
         };
         const visible_files = if (self.scan_state == .scanning) scanned_files else self.library.tracks.len;
-        const title = try std.fmt.allocPrint(frame_alloc, "自在音乐 {s} 已加载{d}文件", .{
+        const title = try std.fmt.allocPrint(frame_alloc, ui_strings.app.loaded_files_fmt, .{
+            ui_strings.app.title,
             scan_label,
             visible_files,
         });
         _ = root.print(&.{seg(title, .{ .bold = true })}, .{ .row_offset = 0, .col_offset = 0, .wrap = .none });
+    }
 
-        const search_prefix = "搜索：";
-        const search_target = if (self.right_pane_mode == .help) "帮助页" else self.right_pane_mode.label();
-        const search_raw = try std.fmt.allocPrint(frame_alloc, "{s}[{s}] {s}", .{
-            search_prefix,
-            search_target,
+    fn drawSearchField(self: *Model, frame_alloc: std.mem.Allocator, root: vaxis.Window, queue_w: u16, body_y: u16) !void {
+        const search_raw = try std.fmt.allocPrint(frame_alloc, "{s}{s}", .{
+            ui_strings.app.search_prefix,
             self.search_query.items,
         });
-        const search_line = try clipText(frame_alloc, search_raw, width);
+        const search_width = @max(@as(usize, 1), @as(usize, @intCast(queue_w -| 4)));
+        const search_line = try clipText(frame_alloc, search_raw, search_width);
         _ = root.print(&.{seg(search_line, if (self.search_mode) styleSelected() else styleMuted())}, .{
-            .row_offset = 1,
-            .col_offset = 0,
+            .row_offset = body_y -| 1,
+            .col_offset = 2,
             .wrap = .none,
         });
-
     }
 
     fn drawQueue(self: *Model, frame_alloc: std.mem.Allocator, win: vaxis.Window) !void {
@@ -786,8 +793,8 @@ const Model = struct {
         const current_idx = self.playback.currentQueueIndex();
         if (items.len == 0) {
             self.selected_queue = 0;
-            const empty = try clipText(frame_alloc, "队列为空", contentWidth(win));
-            _ = win.print(&.{seg(empty, styleMuted())}, .{ .row_offset = 1, .col_offset = 0, .wrap = .none });
+            const empty = try clipText(frame_alloc, ui_strings.app.queue_empty, contentWidth(win));
+            _ = win.print(&.{seg(empty, styleMuted())}, .{ .row_offset = 0, .col_offset = 0, .wrap = .none });
             return;
         }
 
@@ -798,13 +805,13 @@ const Model = struct {
             const idx = self.queue_scroll + row;
             if (idx >= items.len) break;
             const selected = idx == self.selected_queue and self.focus == .queue;
-            if (selected) try paintRowBackground(frame_alloc, win, @intCast(row + 1), styleSelected());
+            if (selected) try paintRowBackground(frame_alloc, win, @intCast(row), styleSelected());
             const label = trackNameByPath(self, items[idx]);
             const marker = if (current_idx != null and idx == current_idx.?) "▶ " else "  ";
             const raw = try std.fmt.allocPrint(frame_alloc, "{s}{s}", .{ marker, label });
             const clipped = try clipText(frame_alloc, raw, contentWidth(win));
             _ = win.print(&.{seg(clipped, if (selected) styleSelected() else .{})}, .{
-                .row_offset = @intCast(row + 1),
+                .row_offset = @intCast(row),
                 .col_offset = 0,
                 .wrap = .none,
             });
@@ -828,14 +835,14 @@ const Model = struct {
             if (idx >= playlists.len) break;
             const playlist = playlists[idx];
             const selected = idx == self.selected_playlist and self.focus == .browser and self.right_pane_mode == .playlists;
-            if (selected) try paintRowBackground(frame_alloc, win, @intCast(row + 1), styleSelected());
+            if (selected) try paintRowBackground(frame_alloc, win, @intCast(row), styleSelected());
             const raw_line = try std.fmt.allocPrint(frame_alloc, "{s} [{s}]", .{
                 playlist.name,
                 playlist.kind_label,
             });
             const clipped = try clipText(frame_alloc, raw_line, contentWidth(win));
             _ = win.print(&.{seg(clipped, if (selected) styleSelected() else .{})}, .{
-                .row_offset = @intCast(row + 1),
+                .row_offset = @intCast(row),
                 .col_offset = 0,
                 .wrap = .none,
             });
@@ -862,17 +869,17 @@ const Model = struct {
             if (idx >= tracks.len) break;
             const track = tracks[idx];
             const selected = idx == self.selected_track and self.focus == .browser and (self.right_pane_mode == .songs or self.right_pane_mode == .artist);
-            if (selected) try paintRowBackground(frame_alloc, win, @intCast(row + 1), styleSelected());
+            if (selected) try paintRowBackground(frame_alloc, win, @intCast(row), styleSelected());
             const line = try formatTrackLine(frame_alloc, track, contentWidth(win), true);
             _ = win.print(&.{seg(line.left, if (selected) styleSelected() else .{})}, .{
-                .row_offset = @intCast(row + 1),
+                .row_offset = @intCast(row),
                 .col_offset = 0,
                 .wrap = .none,
             });
             if (line.right.len > 0) {
                 const col = durationColumn(win, line.right);
                 _ = win.print(&.{seg(line.right, if (selected) styleSelected() else styleMuted())}, .{
-                    .row_offset = @intCast(row + 1),
+                    .row_offset = @intCast(row),
                     .col_offset = col,
                     .wrap = .none,
                 });
@@ -885,16 +892,17 @@ const Model = struct {
     fn drawFooter(self: *Model, frame_alloc: std.mem.Allocator, root: vaxis.Window, width: u16, height: u16) !void {
         const current_path = self.playback.currentPath();
         const state_icon = if (!self.playback.is_playing and current_path.len == 0)
-            "[]"
+            ui_strings.app.footer_idle
         else if (self.playback.paused)
-            "[暂停]"
+            ui_strings.app.footer_paused
         else
-            "[播放]";
+            ui_strings.app.footer_playing;
 
         const song_name = self.currentTrackDisplayName();
-        const line1_raw = try std.fmt.allocPrint(frame_alloc, "{s} {s}  模式:{s}  {s}", .{
+        const line1_raw = try std.fmt.allocPrint(frame_alloc, "{s} {s}  {s}{s}  {s}", .{
             state_icon,
             song_name,
+            ui_strings.app.footer_mode_prefix,
             playModeChineseLabel(self.playback.play_mode),
             try self.progressText(frame_alloc),
         });
@@ -907,39 +915,39 @@ const Model = struct {
     }
 
     fn drawHelpPage(_: *Model, frame_alloc: std.mem.Allocator, win: vaxis.Window) !void {
-        _ = win.print(&.{seg("q 退出    Tab 切换焦点    Enter 确认/播放    空格 暂停", .{})}, .{
+        _ = win.print(&.{seg(ui_strings.help.line1, .{})}, .{
+            .row_offset = 0,
+            .col_offset = 0,
+            .wrap = .none,
+        });
+        _ = win.print(&.{seg(ui_strings.help.line2, .{})}, .{
             .row_offset = 1,
             .col_offset = 0,
             .wrap = .none,
         });
-        _ = win.print(&.{seg("j/k 移动    n/p 下一首/上一首    m 播放模式    r 重扫", .{})}, .{
+        _ = win.print(&.{seg(ui_strings.help.line3, .{})}, .{
             .row_offset = 2,
             .col_offset = 0,
             .wrap = .none,
         });
-        _ = win.print(&.{seg("/ 编辑搜索（帮助页禁用）    s 切换排序    v 倒序    t 切换歌曲/列表", .{})}, .{
+        _ = win.print(&.{seg(ui_strings.help.line4, .{})}, .{
             .row_offset = 3,
             .col_offset = 0,
             .wrap = .none,
         });
-        _ = win.print(&.{seg("a 关联歌曲/返回    ? 进入/离开帮助页", .{})}, .{
+        _ = win.print(&.{seg(ui_strings.help.line5, .{})}, .{
             .row_offset = 4,
             .col_offset = 0,
             .wrap = .none,
         });
-        _ = win.print(&.{seg("Ctrl-D/Ctrl-U 翻页    Esc 返回/结束搜索    Ctrl-L 清空搜索", .{})}, .{
-            .row_offset = 5,
+        _ = win.print(&.{seg(ui_strings.help.line6, styleMuted())}, .{
+            .row_offset = 6,
             .col_offset = 0,
             .wrap = .none,
         });
-        _ = win.print(&.{seg("左侧：播放队列    右侧：歌曲 / 播放列表 / 帮助", styleMuted())}, .{
-            .row_offset = 7,
-            .col_offset = 0,
-            .wrap = .none,
-        });
-        const note = try clipText(frame_alloc, "搜索框固定在顶部；高亮覆盖整行；退格按 UTF-8 字符删除。", contentWidth(win));
+        const note = try clipText(frame_alloc, ui_strings.help.note, contentWidth(win));
         _ = win.print(&.{seg(note, styleMuted())}, .{
-            .row_offset = 8,
+            .row_offset = 7,
             .col_offset = 0,
             .wrap = .none,
         });
@@ -949,10 +957,10 @@ const Model = struct {
         var playlists = std.ArrayList(FilteredPlaylist).empty;
         errdefer playlists.deinit(self.allocator);
 
-        if (self.shouldIncludePlaylist("全部歌曲")) {
+        if (self.shouldIncludePlaylist(ui_strings.playlist.all_name)) {
             try playlists.append(self.allocator, .{
-                .name = "全部歌曲",
-                .kind_label = "全部",
+                .name = ui_strings.playlist.all_name,
+                .kind_label = ui_strings.playlist.all_kind,
                 .track_indices = &.{},
             });
         }
@@ -968,8 +976,8 @@ const Model = struct {
 
         if (playlists.items.len == 0 and self.right_pane_mode != .playlists) {
             try playlists.append(self.allocator, .{
-                .name = "全部歌曲",
-                .kind_label = "全部",
+                .name = ui_strings.playlist.all_name,
+                .kind_label = ui_strings.playlist.all_kind,
                 .track_indices = &.{},
             });
         }
@@ -1018,7 +1026,7 @@ const Model = struct {
         var visible = std.ArrayList(domain.Track).empty;
         errdefer visible.deinit(self.allocator);
 
-        if (std.mem.eql(u8, playlist.kind_label, "全部")) {
+        if (std.mem.eql(u8, playlist.kind_label, ui_strings.playlist.all_kind)) {
             for (self.library.tracks) |track| {
                 if (self.shouldIncludeTrack(track)) {
                     try visible.append(self.allocator, track);
@@ -1075,7 +1083,7 @@ const Model = struct {
 
     fn currentTrackDisplayName(self: *Model) []const u8 {
         const path = self.playback.currentPath();
-        if (path.len == 0) return "未在播放";
+        if (path.len == 0) return ui_strings.app.now_playing_none;
 
         for (self.library.tracks) |track| {
             if (std.mem.eql(u8, track.path, path)) return track.displayName();
@@ -1225,9 +1233,6 @@ const Model = struct {
         queue_w: u16,
         browser_w: u16,
     ) !void {
-        const queue_title = try std.fmt.allocPrint(frame_alloc, "播放队列 [{d}]", .{self.playback.queueItems().len});
-        try drawPaneTitleBox(frame_alloc, root, 2, body_y -| 1, queue_w -| 4, queue_title, self.focus == .queue);
-
         const browser_title = try self.browserPaneTitle(frame_alloc);
         try drawPaneTitleBox(
             frame_alloc,
@@ -1243,33 +1248,30 @@ const Model = struct {
     fn browserPaneTitle(self: *Model, frame_alloc: std.mem.Allocator) ![]const u8 {
         return switch (self.right_pane_mode) {
             .songs => blk: {
-                const visible = try self.visibleTracks();
-                defer self.allocator.free(visible);
-                break :blk std.fmt.allocPrint(frame_alloc, "歌曲 [{s}{s} | {d}]", .{
+                break :blk std.fmt.allocPrint(frame_alloc, ui_strings.browser_title.songs_fmt, .{
                     sortModeChineseLabel(self.sort_mode),
-                    if (self.sort_reverse) " 倒序" else " 正序",
-                    visible.len,
+                    if (self.sort_reverse) ui_strings.sort_mode.reverse_suffix else ui_strings.sort_mode.forward_suffix,
                 });
             },
             .artist => blk: {
                 const visible = try self.visibleTracks();
                 defer self.allocator.free(visible);
                 const scope_name = switch (self.related_view_kind) {
-                    .artist => fallbackText(self.artist_view_name, "未知"),
-                    .folder => fallbackText(std.fs.path.basename(self.artist_view_name), "当前目录"),
+                    .artist => fallbackText(self.artist_view_name, ui_strings.app.unknown),
+                    .folder => fallbackText(std.fs.path.basename(self.artist_view_name), ui_strings.app.current_directory),
                 };
                 const scope_kind = switch (self.related_view_kind) {
-                    .artist => "作者",
-                    .folder => "目录",
+                    .artist => ui_strings.related.scope_artist,
+                    .folder => ui_strings.related.scope_folder,
                 };
-                break :blk std.fmt.allocPrint(frame_alloc, "关联：{s} {s} [{d}]", .{
+                break :blk std.fmt.allocPrint(frame_alloc, ui_strings.browser_title.related_fmt, .{
                     scope_kind,
                     scope_name,
                     visible.len,
                 });
             },
-            .playlists => std.fmt.allocPrint(frame_alloc, "播放列表 [{d}]", .{self.filteredPlaylistsCount()}),
-            .help => frame_alloc.dupe(u8, "按键帮助"),
+            .playlists => std.fmt.allocPrint(frame_alloc, ui_strings.browser_title.playlists_fmt, .{self.filteredPlaylistsCount()}),
+            .help => frame_alloc.dupe(u8, ui_strings.pane.help),
         };
     }
 
@@ -1337,7 +1339,7 @@ const Model = struct {
 
     fn pageStep(self: *const Model) usize {
         if (self.vx.screen.height <= 6) return 1;
-        const header_h: usize = 3;
+        const header_h: usize = 2;
         const footer_h: usize = 1;
         const body_h = self.vx.screen.height -| header_h -| footer_h;
         const content_rows = body_h -| 1;
@@ -1357,7 +1359,7 @@ const Model = struct {
         if (tracks.len == 0) return;
 
         const selected = tracks[@min(self.selected_track, tracks.len - 1)];
-        const separator_row: u16 = @intCast(list_rows + 1);
+        const separator_row: u16 = @intCast(list_rows);
         const detail_row: u16 = separator_row + 1;
         const label_style: vaxis.Style = if (self.focus == .browser) .{ .bold = true } else styleMuted();
         const value_width = contentWidth(win);
@@ -1369,14 +1371,18 @@ const Model = struct {
             .wrap = .none,
         });
 
-        const artist_line = try std.fmt.allocPrint(frame_alloc, "作者：{s}", .{fallbackText(selected.artist, "未知")});
+        const artist_line = try std.fmt.allocPrint(frame_alloc, ui_strings.detail.artist_fmt, .{
+            fallbackText(selected.artist, ui_strings.app.unknown),
+        });
         _ = win.print(&.{seg(try clipText(frame_alloc, artist_line, value_width), label_style)}, .{
             .row_offset = detail_row,
             .col_offset = 0,
             .wrap = .none,
         });
 
-        const album_line = try std.fmt.allocPrint(frame_alloc, "专辑：{s}", .{fallbackText(selected.album, "未知")});
+        const album_line = try std.fmt.allocPrint(frame_alloc, ui_strings.detail.album_fmt, .{
+            fallbackText(selected.album, ui_strings.app.unknown),
+        });
         _ = win.print(&.{seg(try clipText(frame_alloc, album_line, value_width), styleMuted())}, .{
             .row_offset = detail_row + 1,
             .col_offset = 0,
@@ -1590,7 +1596,7 @@ fn drawPaneTitleBox(
     if (max_width <= 4) return;
     const inner_width = @as(usize, @intCast(max_width - 4));
     const clipped = try clipText(frame_alloc, title, inner_width);
-    const tab = try std.fmt.allocPrint(frame_alloc, "▊ {s}", .{clipped});
+    const tab = try std.fmt.allocPrint(frame_alloc, "{s}", .{clipped});
     _ = root.print(&.{seg(tab, paneBorderStyle(active))}, .{
         .row_offset = y,
         .col_offset = x,
@@ -1641,15 +1647,15 @@ fn trackNameByPath(self: *const Model, path: []const u8) []const u8 {
 
 fn playModeChineseLabel(mode: domain.PlayMode) []const u8 {
     return switch (mode) {
-        .single_loop => "单曲循环",
-        .playlist_loop => "列表循环",
-        .playlist_shuffle => "列表随机",
+        .single_loop => ui_strings.play_mode.single_loop,
+        .playlist_loop => ui_strings.play_mode.playlist_loop,
+        .playlist_shuffle => ui_strings.play_mode.playlist_shuffle,
     };
 }
 
 fn sortModeChineseLabel(mode: SortMode) []const u8 {
     return switch (mode) {
-        .alphabetical => "字母",
-        .modified_time => "修改时间",
+        .alphabetical => ui_strings.sort_mode.alphabetical,
+        .modified_time => ui_strings.sort_mode.modified_time,
     };
 }

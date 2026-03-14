@@ -1,0 +1,95 @@
+{
+  "app": {
+    "title": "自在音乐",
+    "loaded_files_fmt": "{s} {s} 已加载{d}文件",
+    "idle": "空闲",
+    "error": "错误",
+    "queue_empty": "队列为空",
+    "now_playing_none": "未在播放",
+    "current_directory": "当前目录",
+    "unknown": "未知",
+    "terminal_too_small": "终端窗口太小",
+    "search_prefix": "  搜索：",
+    "footer_idle": "[]",
+    "footer_paused": "[暂停]",
+    "footer_playing": "[播放]",
+    "footer_mode_prefix": "模式:"
+  },
+  "pane": {
+    "songs": "歌曲",
+    "related": "关联",
+    "playlists": "播放列表",
+    "help": "快捷键"
+  },
+  "status": {
+    "ready": "就绪",
+    "cached_loaded_fmt": "已加载缓存曲库（{d} 首）",
+    "search_editing": "开始编辑搜索",
+    "sort_fmt": "排序：{s}",
+    "reverse_fmt": "倒序：{s}",
+    "reverse_enabled": "开",
+    "reverse_disabled": "关",
+    "search_applied": "已应用搜索",
+    "search_target_fmt": "搜索目标：{s}",
+    "help_closed": "已退出帮助页",
+    "songs_view_restored": "已返回歌曲视图",
+    "queue_play_started": "开始播放队列曲目",
+    "play_started": "开始播放",
+    "related_artist_fmt": "关联视图：作者 {s}",
+    "related_folder_fmt": "关联视图：目录 {s}",
+    "no_directory_scope": "当前歌曲没有可用的目录范围",
+    "scan_start_initial": "正在扫描音乐库",
+    "scan_start_reload": "正在增量重载曲库",
+    "scan_failed_fmt": "扫描失败：{}",
+    "scan_complete_with_fallback_fmt": "扫描完成（{d} 首使用回退元数据）",
+    "reload_complete_with_fallback_fmt": "重载完成（{d} 首使用回退元数据）",
+    "scan_complete": "扫描完成",
+    "reload_complete": "重载完成",
+    "scan_failed_generic": "扫描失败"
+  },
+  "help": {
+    "line1": "q 退出    Tab 切换焦点    Enter 确认/播放    空格 暂停",
+    "line2": "j/k 移动    n/p 下一首/上一首    m 播放模式    r 重扫",
+    "line3": "/ 编辑搜索（帮助页禁用）    s 切换排序    v 倒序    t 切换歌曲/列表",
+    "line4": "a 关联歌曲/返回    ? 进入/离开帮助页",
+    "line5": "Ctrl-D/Ctrl-U 翻页    Esc 返回/结束搜索    Ctrl-L 清空搜索",
+    "line6": "左侧：播放队列    右侧：歌曲 / 播放列表 / 帮助",
+    "note": "搜索框固定在左侧顶部；高亮覆盖整行；退格按 UTF-8 字符删除。"
+  },
+  "browser_title": {
+    "songs_fmt": "歌曲 [{s}{s}]",
+    "related_fmt": "关联：{s} {s} [{d}]",
+    "playlists_fmt": "播放列表 [{d}]"
+  },
+  "related": {
+    "scope_artist": "作者",
+    "scope_folder": "目录"
+  },
+  "detail": {
+    "artist_fmt": "作者：{s}",
+    "album_fmt": "专辑：{s}"
+  },
+  "playlist": {
+    "all_name": "全部歌曲",
+    "all_kind": "全部"
+  },
+  "playlist_kind": {
+    "folder": "文件夹",
+    "artist": "单曲",
+    "album": "专辑"
+  },
+  "play_mode": {
+    "single_loop": "单曲循环",
+    "playlist_loop": "列表循环",
+    "playlist_shuffle": "列表随机"
+  },
+  "sort_mode": {
+    "alphabetical": "字母",
+    "modified_time": "修改时间",
+    "forward_suffix": " 正序",
+    "reverse_suffix": " 倒序"
+  },
+  "playback": {
+    "error_fmt": "播放失败：{s} ({s})"
+  }
+}
