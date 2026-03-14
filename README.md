@@ -1,4 +1,9 @@
 # 自在音乐
+<div align="center">
+<img width="30%" src="https://github.com/user-attachments/assets/6d086d7a-9792-41ce-ad1c-269ca6a180cc" />
+</div>
+
+<img width="100%" align="center" src="https://github.com/user-attachments/assets/3c14b872-eb75-42a6-be29-08842bc9edee" />
 
 Linux TUI音乐播放器
 
