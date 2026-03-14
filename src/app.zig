@@ -24,6 +24,11 @@ const FocusPane = enum {
     browser,
 };
 
+const RelatedViewKind = enum {
+    artist,
+    folder,
+};
+
 const RightPaneMode = enum {
     songs,
     artist,
@@ -33,7 +38,7 @@ const RightPaneMode = enum {
     fn label(self: RightPaneMode) []const u8 {
         return switch (self) {
             .songs => "歌曲",
-            .artist => "作者",
+            .artist => "关联",
             .playlists => "播放列表",
             .help => "帮助",
         };
@@ -113,6 +118,7 @@ const Model = struct {
     search_query: std.ArrayList(u8),
     normalized_query: []const u8,
     artist_view_name: []const u8,
+    related_view_kind: RelatedViewKind = .artist,
     spinner_frame: usize = 0,
     status_message: std.ArrayList(u8),
     scan_state: ScanState = .idle,
@@ -151,7 +157,6 @@ const Model = struct {
         errdefer player.deinit();
 
         const session_state = database.loadSessionState(allocator) catch storage.SessionState{
-            .selected_playlist_name = try allocator.dupe(u8, ""),
             .current_track_path = try allocator.dupe(u8, ""),
         };
 
@@ -190,7 +195,6 @@ const Model = struct {
         };
 
         try self.rebuildSearchQuery();
-        self.selected_playlist = self.findPlaylistByName(session_state.selected_playlist_name) orelse 0;
         try self.reconcileVisibleState();
         if (self.library.tracks.len > 0) {
             try self.setStatusFmt("已加载缓存曲库（{d} 首）", .{self.library.tracks.len});
@@ -213,7 +217,6 @@ const Model = struct {
         self.allocator.free(self.song_view_selected_track_path);
         self.search_query.deinit(self.allocator);
 
-        self.allocator.free(self.session_state.selected_playlist_name);
         self.allocator.free(self.session_state.current_track_path);
 
         self.playback.deinit();
@@ -300,6 +303,11 @@ const Model = struct {
 
         if (self.search_mode) {
             try self.handleSearchKey(key);
+            return;
+        }
+
+        if (isEscapeKey(key)) {
+            try self.handleEscapeKey();
             return;
         }
 
@@ -402,7 +410,7 @@ const Model = struct {
     }
 
     fn handleSearchKey(self: *Model, key: vaxis.Key) !void {
-        if (key.matches(vaxis.Key.escape, .{}) or key.matches(vaxis.Key.enter, .{})) {
+        if (isEscapeKey(key) or key.matches(vaxis.Key.enter, .{})) {
             self.search_mode = false;
             try self.rebuildSearchQuery();
             try self.setStatus("已应用搜索");
@@ -434,6 +442,36 @@ const Model = struct {
                 try self.rebuildSearchQuery();
                 self.dirty = true;
             }
+        }
+    }
+
+    fn handleEscapeKey(self: *Model) !void {
+        if (self.right_pane_mode == .help) {
+            self.right_pane_mode = .songs;
+            self.focus = .browser;
+            try self.setStatus("已退出帮助页");
+            self.dirty = true;
+            return;
+        }
+        if (self.right_pane_mode == .artist) {
+            try self.clearArtistView();
+            self.right_pane_mode = .songs;
+            self.focus = .browser;
+            try self.restoreSongViewPosition();
+            try self.setStatus("已返回歌曲视图");
+            self.dirty = true;
+            return;
+        }
+        if (self.right_pane_mode == .playlists) {
+            self.right_pane_mode = .songs;
+            self.focus = .browser;
+            try self.setStatus("已返回歌曲视图");
+            self.dirty = true;
+            return;
+        }
+        if (self.focus == .queue) {
+            self.focus = .browser;
+            self.dirty = true;
         }
     }
 
@@ -503,44 +541,25 @@ const Model = struct {
         if (visible.len == 0) return;
 
         const selected = visible[@min(self.selected_track, visible.len - 1)];
-        if (selected.artist.len == 0 and selected.album.len == 0) {
-            try self.jumpToFolderPlaylist(selected.folder);
-            return;
-        }
-        if (selected.artist.len == 0) {
-            try self.setStatus("当前歌曲没有作者信息");
-            self.dirty = true;
-            return;
-        }
-
         try self.captureSongViewPosition(selected.path);
-        try self.setArtistView(selected.artist);
+        if (selected.artist.len > 0) {
+            try self.setArtistView(selected.artist);
+            self.related_view_kind = .artist;
+            try self.setStatusFmt("关联视图：作者 {s}", .{selected.artist});
+        } else {
+            const folder_path = std.fs.path.dirname(selected.path) orelse "";
+            if (folder_path.len == 0) {
+                try self.setStatus("当前歌曲没有可用的目录范围");
+                self.dirty = true;
+                return;
+            }
+            try self.setArtistView(folder_path);
+            self.related_view_kind = .folder;
+            try self.setStatusFmt("关联视图：目录 {s}", .{std.fs.path.basename(folder_path)});
+        }
         self.right_pane_mode = .artist;
         self.selected_track = 0;
         self.track_scroll = 0;
-        try self.setStatusFmt("作者视图：{s}", .{selected.artist});
-        self.dirty = true;
-    }
-
-    fn jumpToFolderPlaylist(self: *Model, folder_name: []const u8) !void {
-        if (folder_name.len == 0) {
-            try self.setStatus("当前歌曲没有可跳转的文件夹");
-            self.dirty = true;
-            return;
-        }
-
-        self.right_pane_mode = .playlists;
-        if (self.findPlaylistByName(folder_name)) |idx| {
-            self.selected_playlist = idx;
-        } else {
-            try self.clearSearchQuery();
-            self.right_pane_mode = .playlists;
-            self.selected_playlist = self.findPlaylistByName(folder_name) orelse 0;
-        }
-        self.playlist_scroll = 0;
-        self.selected_track = 0;
-        self.track_scroll = 0;
-        try self.setStatusFmt("已跳转到文件夹列表：{s}", .{folder_name});
         self.dirty = true;
     }
 
@@ -620,13 +639,15 @@ const Model = struct {
         self.scan_shared.mutex.unlock();
 
         const was_empty = self.library.tracks.len == 0;
+        const selected_playlist_name = try self.currentPlaylistName();
+        defer self.allocator.free(selected_playlist_name);
         self.database.saveLibrary(&result.library) catch {};
         self.library.deinit();
         self.library = result.library;
         self.allocator.destroy(result);
 
         self.scan_state = .applied;
-        self.selected_playlist = self.findPlaylistByName(self.session_state.selected_playlist_name) orelse 0;
+        self.selected_playlist = self.findPlaylistByName(selected_playlist_name) orelse 0;
         self.selected_track = 0;
         self.playlist_scroll = 0;
         self.track_scroll = 0;
@@ -743,7 +764,7 @@ const Model = struct {
         });
         _ = root.print(&.{seg(title, .{ .bold = true })}, .{ .row_offset = 0, .col_offset = 0, .wrap = .none });
 
-        const search_prefix = if (self.search_mode) "搜索*：" else "搜索：";
+        const search_prefix = "搜索：";
         const search_target = if (self.right_pane_mode == .help) "帮助页" else self.right_pane_mode.label();
         const search_raw = try std.fmt.allocPrint(frame_alloc, "{s}[{s}] {s}", .{
             search_prefix,
@@ -901,12 +922,12 @@ const Model = struct {
             .col_offset = 0,
             .wrap = .none,
         });
-        _ = win.print(&.{seg("a 作者视图/返回    ? 进入/离开帮助页", .{})}, .{
+        _ = win.print(&.{seg("a 关联歌曲/返回    ? 进入/离开帮助页", .{})}, .{
             .row_offset = 4,
             .col_offset = 0,
             .wrap = .none,
         });
-        _ = win.print(&.{seg("Ctrl-D/Ctrl-U 翻页    Esc 结束搜索    Ctrl-L 清空搜索", .{})}, .{
+        _ = win.print(&.{seg("Ctrl-D/Ctrl-U 翻页    Esc 返回/结束搜索    Ctrl-L 清空搜索", .{})}, .{
             .row_offset = 5,
             .col_offset = 0,
             .wrap = .none,
@@ -1034,8 +1055,14 @@ const Model = struct {
 
     fn trackMatchesArtistView(self: *Model, track: domain.Track) bool {
         if (self.artist_view_name.len == 0) return false;
-        return std.mem.eql(u8, track.artist, self.artist_view_name) or
-            std.ascii.eqlIgnoreCase(track.artist, self.artist_view_name);
+        return switch (self.related_view_kind) {
+            .artist => std.mem.eql(u8, track.artist, self.artist_view_name) or
+                std.ascii.eqlIgnoreCase(track.artist, self.artist_view_name),
+            .folder => blk: {
+                const folder_path = std.fs.path.dirname(track.path) orelse "";
+                break :blk std.mem.eql(u8, folder_path, self.artist_view_name);
+            },
+        };
     }
 
     fn sortTracks(self: *Model, tracks: []domain.Track) void {
@@ -1146,19 +1173,10 @@ const Model = struct {
     }
 
     fn persistSession(self: *Model) !void {
-        self.allocator.free(self.session_state.selected_playlist_name);
         self.allocator.free(self.session_state.current_track_path);
-
-        const playlists = try self.filteredPlaylists();
-        defer self.allocator.free(playlists);
-        const selected_name = if (playlists.len == 0)
-            "全部歌曲"
-        else
-            playlists[@min(self.selected_playlist, playlists.len - 1)].name;
 
         self.session_state = .{
             .play_mode = self.playback.play_mode,
-            .selected_playlist_name = try self.allocator.dupe(u8, selected_name),
             .current_track_path = try self.allocator.dupe(u8, self.playback.currentPath()),
             .current_position_seconds = self.playback.current_position_seconds,
         };
@@ -1184,11 +1202,19 @@ const Model = struct {
     fn clearArtistView(self: *Model) !void {
         self.allocator.free(self.artist_view_name);
         self.artist_view_name = try self.allocator.dupe(u8, "");
+        self.related_view_kind = .artist;
     }
 
     fn clearSearchQuery(self: *Model) !void {
         self.search_query.clearRetainingCapacity();
         try self.rebuildSearchQuery();
+    }
+
+    fn currentPlaylistName(self: *Model) ![]u8 {
+        const playlists = try self.filteredPlaylists();
+        defer self.allocator.free(playlists);
+        if (playlists.len == 0) return self.allocator.dupe(u8, "");
+        return self.allocator.dupe(u8, playlists[@min(self.selected_playlist, playlists.len - 1)].name);
     }
 
     fn drawPaneTitleBoxes(
@@ -1228,8 +1254,17 @@ const Model = struct {
             .artist => blk: {
                 const visible = try self.visibleTracks();
                 defer self.allocator.free(visible);
-                break :blk std.fmt.allocPrint(frame_alloc, "作者：{s} [{d}]", .{
-                    fallbackText(self.artist_view_name, "未知"),
+                const scope_name = switch (self.related_view_kind) {
+                    .artist => fallbackText(self.artist_view_name, "未知"),
+                    .folder => fallbackText(std.fs.path.basename(self.artist_view_name), "当前目录"),
+                };
+                const scope_kind = switch (self.related_view_kind) {
+                    .artist => "作者",
+                    .folder => "目录",
+                };
+                break :blk std.fmt.allocPrint(frame_alloc, "关联：{s} {s} [{d}]", .{
+                    scope_kind,
+                    scope_name,
                     visible.len,
                 });
             },
@@ -1261,35 +1296,42 @@ const Model = struct {
     }
 
     fn pageDown(self: *Model) !void {
-        const amount = self.pageStep();
-        if (amount == 0) return;
+        const rows = self.pageStep();
+        if (rows == 0) return;
         if (self.focus == .queue) {
-            self.moveQueueSelection(@intCast(amount));
+            pageSelection(&self.queue_scroll, &self.selected_queue, self.playback.queueItems().len, rows, true);
             return;
         }
         if (self.right_pane_mode == .playlists) {
-            self.movePlaylistSelection(@intCast(amount));
+            pageSelection(&self.playlist_scroll, &self.selected_playlist, self.filteredPlaylistsCount(), rows, true);
+            self.selected_track = 0;
+            self.track_scroll = 0;
             return;
         }
         if (self.right_pane_mode == .songs or self.right_pane_mode == .artist) {
-            try self.moveTrackSelection(@intCast(amount));
+            const tracks = try self.visibleTracks();
+            defer self.allocator.free(tracks);
+            pageSelection(&self.track_scroll, &self.selected_track, tracks.len, rows, true);
         }
     }
 
     fn pageUp(self: *Model) !void {
-        const amount = self.pageStep();
-        if (amount == 0) return;
-        const delta: isize = -@as(isize, @intCast(amount));
+        const rows = self.pageStep();
+        if (rows == 0) return;
         if (self.focus == .queue) {
-            self.moveQueueSelection(delta);
+            pageSelection(&self.queue_scroll, &self.selected_queue, self.playback.queueItems().len, rows, false);
             return;
         }
         if (self.right_pane_mode == .playlists) {
-            self.movePlaylistSelection(delta);
+            pageSelection(&self.playlist_scroll, &self.selected_playlist, self.filteredPlaylistsCount(), rows, false);
+            self.selected_track = 0;
+            self.track_scroll = 0;
             return;
         }
         if (self.right_pane_mode == .songs or self.right_pane_mode == .artist) {
-            try self.moveTrackSelection(delta);
+            const tracks = try self.visibleTracks();
+            defer self.allocator.free(tracks);
+            pageSelection(&self.track_scroll, &self.selected_track, tracks.len, rows, false);
         }
     }
 
@@ -1391,6 +1433,30 @@ fn keepSelectionVisible(scroll: usize, selection: usize, total: usize, rows: usi
     if (selection >= next + rows) next = selection - rows + 1;
     if (next + rows > total) next = total -| rows;
     return next;
+}
+
+fn pageSelection(scroll: *usize, selection: *usize, total: usize, rows: usize, down: bool) void {
+    if (rows == 0 or total == 0) {
+        scroll.* = 0;
+        selection.* = 0;
+        return;
+    }
+
+    const current_selection = @min(selection.*, total - 1);
+    const visible_scroll = keepSelectionVisible(scroll.*, current_selection, total, rows);
+    const relative_row = @min(current_selection - visible_scroll, rows - 1);
+    const max_scroll = total -| rows;
+    const next_scroll = if (down)
+        @min(visible_scroll + rows, max_scroll)
+    else
+        visible_scroll -| rows;
+
+    scroll.* = next_scroll;
+    selection.* = next_scroll + @min(relative_row, total - 1 - next_scroll);
+}
+
+fn isEscapeKey(key: vaxis.Key) bool {
+    return key.matches(vaxis.Key.escape, .{}) or key.matches('[', .{ .ctrl = true });
 }
 
 fn contentRows(win: vaxis.Window) usize {
@@ -1524,7 +1590,7 @@ fn drawPaneTitleBox(
     if (max_width <= 4) return;
     const inner_width = @as(usize, @intCast(max_width - 4));
     const clipped = try clipText(frame_alloc, title, inner_width);
-    const tab = try std.fmt.allocPrint(frame_alloc, "┌ {s} ┐", .{clipped});
+    const tab = try std.fmt.allocPrint(frame_alloc, "▊ {s}", .{clipped});
     _ = root.print(&.{seg(tab, paneBorderStyle(active))}, .{
         .row_offset = y,
         .col_offset = x,

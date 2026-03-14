@@ -29,9 +29,9 @@ pub const PlaylistKind = enum {
 
     pub fn label(self: PlaylistKind) []const u8 {
         return switch (self) {
-            .folder => "Folder",
-            .artist => "Artist",
-            .album => "Album",
+            .folder => "文件夹",
+            .artist => "单曲",
+            .album => "专辑",
         };
     }
 };

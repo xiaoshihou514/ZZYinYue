@@ -7,7 +7,6 @@ const c = @cImport({
 
 pub const SessionState = struct {
     play_mode: domain.PlayMode = .playlist_loop,
-    selected_playlist_name: []const u8 = "",
     current_track_path: []const u8 = "",
     current_position_seconds: f64 = 0.0,
 };
@@ -231,7 +230,6 @@ pub const Database = struct {
 
         const items = [_]struct { key: []const u8, value: []const u8 }{
             .{ .key = "play_mode", .value = state.play_mode.label() },
-            .{ .key = "selected_playlist_name", .value = state.selected_playlist_name },
             .{ .key = "current_track_path", .value = state.current_track_path },
         };
 
@@ -248,6 +246,8 @@ pub const Database = struct {
         try bindText(statement, 1, "current_position_seconds");
         try bindText(statement, 2, position);
         try stepDone(statement);
+
+        try self.exec("DELETE FROM app_state WHERE key = 'selected_playlist_name';");
     }
 
     pub fn loadSessionState(self: *Database, allocator: std.mem.Allocator) !SessionState {
@@ -255,11 +255,9 @@ pub const Database = struct {
         defer _ = c.sqlite3_finalize(stmt);
 
         var state = SessionState{
-            .selected_playlist_name = try allocator.dupe(u8, ""),
             .current_track_path = try allocator.dupe(u8, ""),
         };
         errdefer {
-            allocator.free(state.selected_playlist_name);
             allocator.free(state.current_track_path);
         }
 
@@ -270,9 +268,6 @@ pub const Database = struct {
                 if (std.mem.eql(u8, value, "single")) state.play_mode = .single_loop;
                 if (std.mem.eql(u8, value, "loop")) state.play_mode = .playlist_loop;
                 if (std.mem.eql(u8, value, "shuffle")) state.play_mode = .playlist_shuffle;
-            } else if (std.mem.eql(u8, key, "selected_playlist_name")) {
-                allocator.free(state.selected_playlist_name);
-                state.selected_playlist_name = try allocator.dupe(u8, value);
             } else if (std.mem.eql(u8, key, "current_track_path")) {
                 allocator.free(state.current_track_path);
                 state.current_track_path = try allocator.dupe(u8, value);
@@ -333,4 +328,36 @@ fn columnText(stmt: *c.sqlite3_stmt, index: c_int) []const u8 {
 
 fn dupColumnText(allocator: std.mem.Allocator, stmt: *c.sqlite3_stmt, index: c_int) ![]const u8 {
     return allocator.dupe(u8, columnText(stmt, index));
+}
+
+test "session state ignores legacy playlist selection" {
+    var db = try Database.open(std.testing.allocator, ":memory:");
+    defer db.close();
+
+    try db.exec(
+        \\INSERT INTO app_state (key, value) VALUES ('selected_playlist_name', '旧列表');
+        \\INSERT INTO app_state (key, value) VALUES ('play_mode', 'shuffle');
+        \\INSERT INTO app_state (key, value) VALUES ('current_track_path', '/tmp/demo.flac');
+        \\INSERT INTO app_state (key, value) VALUES ('current_position_seconds', '12.5');
+    );
+
+    const loaded = try db.loadSessionState(std.testing.allocator);
+    defer std.testing.allocator.free(loaded.current_track_path);
+
+    try std.testing.expectEqual(domain.PlayMode.playlist_shuffle, loaded.play_mode);
+    try std.testing.expectEqualStrings("/tmp/demo.flac", loaded.current_track_path);
+    try std.testing.expectEqual(@as(f64, 12.5), loaded.current_position_seconds);
+
+    try db.saveSessionState(.{
+        .play_mode = .single_loop,
+        .current_track_path = "/tmp/other.flac",
+        .current_position_seconds = 3.25,
+    });
+
+    const reloaded = try db.loadSessionState(std.testing.allocator);
+    defer std.testing.allocator.free(reloaded.current_track_path);
+
+    try std.testing.expectEqual(domain.PlayMode.single_loop, reloaded.play_mode);
+    try std.testing.expectEqualStrings("/tmp/other.flac", reloaded.current_track_path);
+    try std.testing.expectEqual(@as(f64, 3.25), reloaded.current_position_seconds);
 }
